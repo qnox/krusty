@@ -40,11 +40,7 @@ impl super::ProductionSignatureSemantics<'_> {
         let slots = crate::libraries::map_call_args(
             source_indices,
             Some(names),
-            &candidate.call_sig.param_names,
-            candidate.params.len(),
-            candidate.call_sig.required,
-            &candidate.call_sig.param_defaults,
-            candidate.call_sig.vararg_index,
+            crate::libraries::ParameterSlots::of(&candidate.call_sig, candidate.params.len()),
             trailing_lambda,
         )
         .ok()?;

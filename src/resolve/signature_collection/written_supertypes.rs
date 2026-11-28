@@ -17,15 +17,31 @@ pub(in crate::resolve) struct WrittenSupertypes<'a> {
     pub(in crate::resolve) interfaces_before_superclass: u32,
 }
 
+pub(in crate::resolve) fn split_written<'a>(
+    file: &crate::ast::File,
+    class: &ClassDecl,
+    header: &'a StreamedClassifierHeader,
+    diags: &mut crate::diag::DiagSink,
+    is_class: impl FnMut(&TypeRef) -> bool,
+) -> WrittenSupertypes<'a> {
+    WrittenSupertypes::split(file, class, header, diags, is_class)
+}
+
 impl<'a> WrittenSupertypes<'a> {
     /// Splits `header`'s supertypes. `is_class` classifies a written entry that may be a parenless
     /// base; it is asked only when the declaration has no primary constructor call to its base and
     /// a secondary constructor delegates to `super`.
     pub(in crate::resolve) fn split(
+        file: &crate::ast::File,
         class: &ClassDecl,
         header: &'a StreamedClassifierHeader,
+        diags: &mut crate::diag::DiagSink,
         mut is_class: impl FnMut(&TypeRef) -> bool,
     ) -> Self {
+        // A header constructor call without a primary is reported before an unresolved supertype.
+        super::super::superclass_validation::report_header_constructor_without_primary(
+            file, class, diags,
+        );
         // The parser can promote only a SAME-FILE base; at this all-files signature pass, the
         // caller classifies an other-file module declaration or a library classifier, and both
         // origins feed the same superclass entry.

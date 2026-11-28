@@ -256,7 +256,7 @@ pub(super) fn non_vararg_among<'a>(
             .map(|(candidate, params)| (params.clone(), *candidate))
             .collect(),
         |_, left, right| {
-            super::parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
+            parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
         },
     )
 }
@@ -1482,6 +1482,56 @@ pub(super) fn indexed_call_shape(
     Some((params, ret, bindings))
 }
 
+/// Whether `left` is at least as specific as `right` for `arg`.
+///
+/// Numeric parameters that are not subtypes of one another still have a specificity order: every
+/// signed integer is at least as specific as every unsigned integer, `Int` as `Long`/`Short`/`Byte`,
+/// `Short` as `Byte`, `UInt` as `ULong`/`UShort`/`UByte`, `UShort` as `UByte`, and `Double` as
+/// `Float`. The relation compares the parameter types. It is not limited to a `Nothing` argument;
+/// `Nothing` (and an integer literal) is what makes several of those parameters applicable at once.
+/// Pairs kotlinc leaves unordered, such as `Short` and `Long` or `Int` and `Double`, stay tied.
+/// The comparison is per argument, so a mixed call and a family of more than two candidates use
+/// the same relation.
+pub(crate) fn parameter_at_least_as_specific(
+    src: &dyn SymbolSource,
+    left: Ty,
+    right: Ty,
+    arg: CallArgKind,
+) -> bool {
+    left == right
+        || (left == arg.ty() && arg.adapts_integer_literal_to(right))
+        || semantic_arg_assignable(src, &right, &left)
+        || numeric_parameter_at_least_as_specific(left, right)
+}
+
+/// kotlinc's non-subtype numeric specificity. `specific` and `general` are parameter types.
+/// Nullability is outside the order: `Int?` is at least as specific as `Long`, and `Int` as
+/// `Long?`, when both parameters are applicable. `nullable_int_is_more_specific_than_long` pins
+/// `Int?` against `Long`.
+fn numeric_parameter_at_least_as_specific(specific: Ty, general: Ty) -> bool {
+    let specific = specific.non_null();
+    let general = general.non_null();
+    if signed_integer(specific) && unsigned_integer(general) {
+        return true;
+    }
+    matches!(
+        (specific, general),
+        (Ty::Int, Ty::Long | Ty::Short | Ty::Byte)
+            | (Ty::Short, Ty::Byte)
+            | (Ty::UInt, Ty::ULong | Ty::UShort | Ty::UByte)
+            | (Ty::UShort, Ty::UByte)
+            | (Ty::Double, Ty::Float)
+    )
+}
+
+fn signed_integer(ty: Ty) -> bool {
+    matches!(ty, Ty::Byte | Ty::Short | Ty::Int | Ty::Long)
+}
+
+fn unsigned_integer(ty: Ty) -> bool {
+    matches!(ty, Ty::UByte | Ty::UShort | Ty::UInt | Ty::ULong)
+}
+
 /// Assignability through the SOURCE symbol federation (module classes first): a module-declared
 /// class passed where a library member expects its (library) supertype — `class V : Thread()` into
 /// `take(Thread)` — is invisible to the platform oracle, which only walks classpath supertypes.
@@ -1798,8 +1848,14 @@ fn best_by_args_at_priority_with_ties<'a>(
         }
         CandidateSelectionWithTies::None => {}
     }
-    let specificity = |_: usize, left: Ty, right: Ty| {
-        parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
+    // The argument's runtime type, without integer-literal provenance. Literal adaptation stays in
+    // its own pass; a `Nothing` argument still reaches the shared specificity relation.
+    let specificity = |position: usize, left: Ty, right: Ty| {
+        let argument = args
+            .get(position)
+            .map(|argument| CallArgKind::Typed(argument.ty()))
+            .unwrap_or(CallArgKind::Typed(Ty::Error));
+        parameter_at_least_as_specific(src, left, right, argument)
     };
 
     // Contextual nested calls use this same comparison. Keeping them in a fixed-only pre-pass

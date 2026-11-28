@@ -446,16 +446,23 @@ impl<'a> BodyLowering<'a> {
         if !operands.defaults.is_empty() {
             return unsupported("an object literal omitting a superclass constructor argument");
         }
-        // A superclass this library realizes is reached by its constructor's ordinal; one the
-        // target lays out itself, by the provider's constructor, as a source class extending it.
+        // A superclass this library realizes is reached by the constructor place materialization
+        // recorded. One the target lays out itself is reached by the provider's constructor, as a
+        // source class extending it is.
         let (ordinal, external) = match self.ir.class_id_by_name(superclass) {
-            Some(parent) => (
-                super::super::body_unit::superclass_constructor_ordinal(
-                    Some(&self.ir.classes[parent as usize]),
-                    operands.declaration.declared_parameters(),
-                )?,
-                None,
-            ),
+            Some(parent) => {
+                let ordinal = if let Some(target) = operands.materialized {
+                    target.ordinal
+                } else if self.ir.classes[parent as usize].has_primary_ctor {
+                    0
+                } else {
+                    return Err(mismatch(
+                        "a delegation to a superclass without a primary constructor names no \
+                         selected constructor",
+                    ));
+                };
+                (ordinal, None)
+            }
             None => {
                 // The target lays out only a class it represents; any other superclass must be
                 // one a support unit materializes for the object to extend.

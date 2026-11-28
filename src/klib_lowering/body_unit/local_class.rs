@@ -32,10 +32,11 @@ impl<'s> Linker<'_, 's> {
         // constructor parameters its delegation names.
         let superclass = match &prepared.superclass {
             Some(superclass) => {
-                let declaration = match superclass.constructor {
-                    super::super::same_library_class::SuperclassConstructor::Local(signature) => {
-                        self.link_local_constructor(ir, signature)?.declaration
-                    }
+                let (declaration, target) = match superclass.constructor {
+                    super::super::same_library_class::SuperclassConstructor::Local(signature) => (
+                        self.link_local_constructor(ir, signature)?.declaration,
+                        None,
+                    ),
                     super::super::same_library_class::SuperclassConstructor::Library {
                         signature,
                         classifier,
@@ -56,7 +57,7 @@ impl<'s> Linker<'_, 's> {
                                 "a superclass this unit does not materialize",
                             ));
                         }
-                        linked.declaration
+                        (linked.declaration, linked.materialized)
                     }
                 };
                 let params = declaration.declared_parameters().to_vec();
@@ -65,7 +66,7 @@ impl<'s> Linker<'_, 's> {
                         "a superclass delegation passes another number of arguments".to_owned(),
                     ));
                 }
-                Some((declaration.classifier, params))
+                Some((declaration.classifier, params, target))
             }
             None => None,
         };
@@ -76,9 +77,21 @@ impl<'s> Linker<'_, 's> {
         }
         let mut class = super::super::same_library_class::installed_class(&prepared);
         // The initializer lowers the arguments the constructor passes, as its body reads them.
-        if let Some((name, params)) = superclass {
+        if let Some((name, params, target)) = superclass {
             class.superclass = name;
             class.super_ctor_params = params;
+            if let Some(target) = target {
+                class.super_ctor = target;
+            } else if ir
+                .class_id_by_name(name)
+                .is_some_and(|id| !ir.classes[id as usize].has_primary_ctor)
+            {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a delegation to a superclass without a primary constructor names no selected \
+                     constructor"
+                        .to_owned(),
+                ));
+            }
         }
         let class_id = ir.add_class(class);
         if let Some(naming) = prepared.naming.clone() {

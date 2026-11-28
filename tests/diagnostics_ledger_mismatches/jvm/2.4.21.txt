@@ -392,7 +392,6 @@ compiler/testData/diagnostics/tests/arguments/fieldPlusAssign.kt
 compiler/testData/diagnostics/tests/arguments/genericVarargInferredToNothing.kt
 compiler/testData/diagnostics/tests/arguments/genericVarargInferredToNullableNothing.kt
 compiler/testData/diagnostics/tests/arguments/integerLiteralTypes.kt
-compiler/testData/diagnostics/tests/arguments/integerOverloads.kt
 compiler/testData/diagnostics/tests/arguments/javaAnnotationsWithArrayValue.kt
 compiler/testData/diagnostics/tests/arguments/javaArrayVariance.kt
 compiler/testData/diagnostics/tests/arguments/lambda.kt
@@ -6354,7 +6353,6 @@ compiler/testData/diagnostics/testsWithStdLib/InaccessibleInternalClass.kt
 compiler/testData/diagnostics/testsWithStdLib/PropertyDelegateWithPrivateSet.kt
 compiler/testData/diagnostics/testsWithStdLib/RenameOnImportHidesDefaultImport.kt
 compiler/testData/diagnostics/testsWithStdLib/addAllProjection.kt
-compiler/testData/diagnostics/testsWithStdLib/ambiguityWithUnsignedSpecificity.kt
 compiler/testData/diagnostics/testsWithStdLib/annotationInWhileTrueLoopInExactlyOnceLambda.kt
 compiler/testData/diagnostics/testsWithStdLib/annotations/JvmSyntheticOnDelegate.kt
 compiler/testData/diagnostics/testsWithStdLib/annotations/Synchronized.kt

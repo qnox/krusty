@@ -2919,6 +2919,20 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             .or_default()
                             .push(copy.signature());
                     }
+                    let written = split_written(file, c, &classifier_header, diags, |supertype| {
+                        declared_supertype_name(
+                            c,
+                            &supertype.name,
+                            &header_class_names,
+                            &lexical_inheritors,
+                        )
+                        .is_some_and(|internal| {
+                            user_base_classes.contains(&internal)
+                                || libraries
+                                    .classifier(internal)
+                                    .is_some_and(|ty| !ty.is_interface() && !ty.is_object())
+                        })
+                    });
                     let mut resolve_super = |s: &str| -> String {
                         let resolved =
                             declared_supertype_name(c, s, &header_class_names, &lexical_inheritors)
@@ -2940,20 +2954,6 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             }
                         }
                     };
-                    let written = WrittenSupertypes::split(c, &classifier_header, |supertype| {
-                        declared_supertype_name(
-                            c,
-                            &supertype.name,
-                            &header_class_names,
-                            &lexical_inheritors,
-                        )
-                        .is_some_and(|internal| {
-                            user_base_classes.contains(&internal)
-                                || libraries
-                                    .classifier(internal)
-                                    .is_some_and(|ty| !ty.is_interface() && !ty.is_object())
-                        })
-                    });
                     let mut interfaces: Vec<String> = written
                         .interfaces
                         .iter()

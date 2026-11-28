@@ -1212,11 +1212,7 @@ impl ProductionSignatureSemantics<'_> {
             let slots = crate::libraries::map_call_args(
                 &source_indices,
                 Some(&names),
-                &call_sig.param_names,
-                parameter_indices.len(),
-                call_sig.required,
-                &call_sig.param_defaults,
-                call_sig.vararg_index,
+                crate::libraries::ParameterSlots::of(&call_sig, parameter_indices.len()),
                 trailing_lambda,
             )
             .ok()?;
@@ -1291,11 +1287,10 @@ impl ProductionSignatureSemantics<'_> {
         let slots = crate::libraries::map_call_args(
             &source_indices,
             Some(names),
-            &candidate.call_sig.param_names,
-            candidate.semantic_params().len(),
-            candidate.call_sig.required,
-            &candidate.call_sig.param_defaults,
-            candidate.call_sig.vararg_index,
+            crate::libraries::ParameterSlots::of(
+                &candidate.call_sig,
+                candidate.semantic_params().len(),
+            ),
             trailing_lambda,
         )
         .ok()?;
@@ -1410,11 +1405,10 @@ impl ProductionSignatureSemantics<'_> {
                 crate::libraries::map_call_args(
                     &source_indices,
                     Some(names),
-                    &candidate.call_sig.param_names,
-                    candidate.semantic_params().len(),
-                    candidate.call_sig.required,
-                    &candidate.call_sig.param_defaults,
-                    candidate.call_sig.vararg_index,
+                    crate::libraries::ParameterSlots::of(
+                        &candidate.call_sig,
+                        candidate.semantic_params().len(),
+                    ),
                     trailing_lambda,
                 )
                 .is_ok()
@@ -1541,11 +1535,7 @@ impl ProductionSignatureSemantics<'_> {
         let slots = crate::libraries::map_call_args(
             &sources,
             Some(&names),
-            &call_sig.param_names,
-            parameters.len(),
-            call_sig.required,
-            &call_sig.param_defaults,
-            call_sig.vararg_index,
+            crate::libraries::ParameterSlots::of(call_sig, parameters.len()),
             trailing_lambda,
         )
         .ok()?;

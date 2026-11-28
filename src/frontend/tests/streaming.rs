@@ -3168,7 +3168,7 @@ fn constructor_default_publishes_local_classifier_members_checked_inside_the_def
 fn secondary_constructor_default_is_selected_from_the_stable_parameter_header() {
     let inputs = [SourceInput::kotlin(
         "open class Base(val value: Any) {\n\
-             constructor(text: String = \"OK\") : this(text)\n\
+             constructor(text: String = \"OK\") : this(text as Any)\n\
          }\n\
          object Derived : Base()\n\
          fun box(): String = \"OK\"\n",

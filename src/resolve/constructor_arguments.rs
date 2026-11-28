@@ -2,6 +2,16 @@
 
 use super::*;
 
+fn constructor_parameter_constraint(expected: Ty) -> ConstructorParameterConstraint {
+    if !expected.mentions_ty_param() {
+        ConstructorParameterConstraint::Concrete
+    } else if expected.non_null().is_fun() {
+        ConstructorParameterConstraint::GenericFunction
+    } else {
+        ConstructorParameterConstraint::Inferred
+    }
+}
+
 pub(super) enum SourceConstructorSelection {
     Selected {
         candidate_index: usize,
@@ -11,7 +21,13 @@ pub(super) enum SourceConstructorSelection {
         mismatch: Option<ConstructorArgumentMismatch>,
         rejected: Vec<ConstructorCandidateRejection>,
     },
-    Ambiguous,
+    /// The candidates that survived specificity. Inapplicable overloads are not in this set.
+    Ambiguous { tied: Vec<usize> },
+}
+
+struct CheckedConstructorArgument {
+    expected: Ty,
+    mismatch: Option<ConstructorArgumentMismatch>,
 }
 
 #[derive(Clone, Copy)]
@@ -23,12 +39,16 @@ pub(super) struct ConstructorArgumentMismatch {
 
 /// A failed candidate's original first error, plus all contradictions from a complete mapping.
 /// Incomplete argument shapes keep the legacy first error but publish no diagnostic peer evidence.
+#[derive(Clone)]
 pub(super) struct ConstructorCandidateRejection {
     pub(super) candidate_index: usize,
     pub(super) first: Option<ConstructorArgumentMismatch>,
     pub(super) mapped_mismatches: Vec<ConstructorArgumentMismatch>,
     pub(super) argument_slots: Vec<usize>,
     pub(super) declared_arguments: Vec<Ty>,
+    /// Why the arguments could not be assigned to this candidate. A call that mapped and then
+    /// failed a parameter type keeps that mismatch in [`Self::mapped_mismatches`] instead.
+    pub(super) mapping_failure: Option<CallArgMappingFailure>,
 }
 
 impl ConstructorCandidateRejection {
@@ -39,6 +59,7 @@ impl ConstructorCandidateRejection {
             mapped_mismatches: Vec::new(),
             argument_slots: Vec::new(),
             declared_arguments: Vec::new(),
+            mapping_failure: None,
         }
     }
 }
@@ -110,6 +131,744 @@ impl Checker<'_> {
         !reportable.is_empty()
     }
 
+    /// A delegation no constructor accepted. The shared selector already mapped every candidate;
+    /// this reports that mapping.
+    pub(super) fn report_rejected_delegation(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        arguments: &CtorDelegationCall,
+        candidates: &[CtorDelegationCandidate],
+        rejected: &[ConstructorCandidateRejection],
+        site: (DeclId, usize, Span),
+    ) {
+        let (class, secondary, span) = site;
+        let (candidates, rejected) = Self::rejections_keeping_type_mismatches(candidates, rejected);
+        let reported_types = self.report_single_constructor_argument_mismatches(
+            scope,
+            arguments,
+            &candidates,
+            &rejected,
+        );
+        let reported_excess =
+            self.report_stored_excess(scope, class, arguments, &candidates, &rejected);
+        if reported_types || reported_excess {
+            return;
+        }
+        if self.report_type_mismatch_candidates(
+            scope,
+            class,
+            secondary,
+            span,
+            &candidates,
+            &rejected,
+        ) {
+            return;
+        }
+        if self.report_single_delegation_mapping(
+            class,
+            secondary,
+            span,
+            arguments,
+            &candidates,
+            &rejected,
+        ) {
+            return;
+        }
+        self.report_inapplicable_delegation_candidates(
+            scope,
+            class,
+            secondary,
+            span,
+            &candidates,
+            &rejected,
+        );
+    }
+
+    /// Drop constructors that never mapped an argument once some other constructor did and rejected
+    /// its type. kotlinc then reports that mismatch, or the list of such mismatches, and leaves the
+    /// arity or name failure out. A constructor that mapped an argument stays, whether or not it is
+    /// the delegating constructor.
+    fn rejections_keeping_type_mismatches(
+        candidates: &[CtorDelegationCandidate],
+        rejected: &[ConstructorCandidateRejection],
+    ) -> (
+        Vec<CtorDelegationCandidate>,
+        Vec<ConstructorCandidateRejection>,
+    ) {
+        let reports_type = |rejection: &ConstructorCandidateRejection| {
+            rejection
+                .mapped_mismatches
+                .iter()
+                .any(|mismatch| mismatch.actual != Ty::Error && mismatch.expected != Ty::Error)
+        };
+        if !rejected.iter().any(reports_type) {
+            return (candidates.to_vec(), rejected.to_vec());
+        }
+        let mut kept_index = Vec::new();
+        let kept_candidates = candidates
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| {
+                rejected
+                    .iter()
+                    .find(|rejection| rejection.candidate_index == *index)
+                    .is_none_or(reports_type)
+            })
+            .map(|(index, candidate)| {
+                kept_index.push(index);
+                candidate.clone()
+            })
+            .collect();
+        let kept_rejected = rejected
+            .iter()
+            .filter(|rejection| reports_type(rejection))
+            .map(|rejection| {
+                let mut rejection = rejection.clone();
+                rejection.candidate_index = kept_index
+                    .iter()
+                    .position(|index| *index == rejection.candidate_index)
+                    .unwrap_or(rejection.candidate_index);
+                rejection
+            })
+            .collect();
+        (kept_candidates, kept_rejected)
+    }
+
+    /// Several constructors each rejected a mapped argument. kotlinc lists those constructors and
+    /// not the ones that failed before a type was checked.
+    fn report_type_mismatch_candidates(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        class: DeclId,
+        secondary: usize,
+        span: Span,
+        candidates: &[CtorDelegationCandidate],
+        rejected: &[ConstructorCandidateRejection],
+    ) -> bool {
+        let entries = rejected
+            .iter()
+            .filter(|rejection| {
+                rejection
+                    .mapped_mismatches
+                    .iter()
+                    .any(|mismatch| mismatch.actual != Ty::Error && mismatch.expected != Ty::Error)
+            })
+            .collect::<Vec<_>>();
+        if entries.len() < 2 {
+            return false;
+        }
+        let mut message = String::from("none of the following candidates is applicable:");
+        for rejection in entries {
+            let Some(candidate) = candidates.get(rejection.candidate_index) else {
+                return false;
+            };
+            let Some(signature) = self.constructor_candidate_signature(scope, class, candidate)
+            else {
+                return false;
+            };
+            message.push_str(&format!("\n\n{signature}:"));
+            for mismatch in &rejection.mapped_mismatches {
+                if mismatch.actual == Ty::Error || mismatch.expected == Ty::Error {
+                    continue;
+                }
+                message.push_str(&format!(
+                    "\n  Argument type mismatch: actual type is '{}', but '{}' was expected.",
+                    mismatch.actual.source_name(),
+                    mismatch.expected.source_name()
+                ));
+            }
+        }
+        let span = self
+            .delegation_keyword_span(class, secondary)
+            .unwrap_or(span);
+        self.diags.error(span, message);
+        true
+    }
+
+    /// The one constructor a delegation could reach was given arguments past its parameter list.
+    fn report_stored_excess(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        class: DeclId,
+        arguments: &CtorDelegationCall,
+        candidates: &[CtorDelegationCandidate],
+        rejected: &[ConstructorCandidateRejection],
+    ) -> bool {
+        let ([candidate], [rejection]) = (candidates, rejected) else {
+            return false;
+        };
+        let Some(failure) = rejection.mapping_failure.as_ref() else {
+            return false;
+        };
+        if !failure
+            .errors
+            .iter()
+            .all(|error| matches!(error, CallArgMappingError::TooManyArguments { .. }))
+        {
+            return false;
+        }
+        self.report_excess_arguments(scope, class, arguments, candidate, failure)
+    }
+
+    fn report_excess_arguments(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        class: DeclId,
+        arguments: &CtorDelegationCall,
+        candidate: &CtorDelegationCandidate,
+        failure: &CallArgMappingFailure,
+    ) -> bool {
+        let Some(signature) = self.constructor_candidate_signature(scope, class, candidate) else {
+            return false;
+        };
+        let message = format!("too many arguments for '{signature}'.");
+        let mut reported = false;
+        for error in &failure.errors {
+            let CallArgMappingError::TooManyArguments { argument, .. } = error else {
+                continue;
+            };
+            let Some(&expression) = arguments.args.get(*argument) else {
+                continue;
+            };
+            self.diags.error(self.span(expression), message.clone());
+            reported = true;
+        }
+        reported
+    }
+
+    /// One constructor rejected the call for a missing parameter or an unknown name.
+    fn report_single_delegation_mapping(
+        &mut self,
+        class: DeclId,
+        secondary: usize,
+        span: Span,
+        arguments: &CtorDelegationCall,
+        candidates: &[CtorDelegationCandidate],
+        rejected: &[ConstructorCandidateRejection],
+    ) -> bool {
+        let ([_candidate], [rejection]) = (candidates, rejected) else {
+            return false;
+        };
+        let Some(failure) = rejection.mapping_failure.as_ref() else {
+            return false;
+        };
+        let keyword = self
+            .delegation_keyword_span(class, secondary)
+            .unwrap_or(span);
+        if failure
+            .errors
+            .iter()
+            .all(|error| matches!(error, CallArgMappingError::MissingRequired { .. }))
+        {
+            for error in &failure.errors {
+                self.diags.error(keyword, error.to_string());
+            }
+            return true;
+        }
+        let named = arguments.names.iter().any(Option::is_some);
+        let only_names = failure.errors.iter().all(|error| {
+            matches!(
+                error,
+                CallArgMappingError::NoParameterNamed { .. }
+                    | CallArgMappingError::MissingRequired { .. }
+            )
+        });
+        let unknown = failure
+            .errors
+            .iter()
+            .any(|error| matches!(error, CallArgMappingError::NoParameterNamed { .. }));
+        if !named || !only_names || !unknown {
+            return false;
+        }
+        let mut missing = Vec::new();
+        for error in &failure.errors {
+            if let CallArgMappingError::MissingRequired { name } = error {
+                missing.push(name.clone());
+            }
+        }
+        for name in missing {
+            self.diags
+                .error(keyword, format!("no value passed for parameter '{name}'."));
+        }
+        for error in &failure.errors {
+            let CallArgMappingError::NoParameterNamed { argument, .. } = error else {
+                continue;
+            };
+            let name_span = arguments
+                .name_spans
+                .get(*argument)
+                .copied()
+                .flatten()
+                .unwrap_or(keyword);
+            self.diags.error(name_span, error.to_string());
+        }
+        true
+    }
+
+    /// Every candidate rejected the call for a missing parameter or an unknown name.
+    fn report_inapplicable_delegation_candidates(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        class: DeclId,
+        secondary: usize,
+        span: Span,
+        candidates: &[CtorDelegationCandidate],
+        rejected: &[ConstructorCandidateRejection],
+    ) -> bool {
+        if candidates.len() < 2 || rejected.len() != candidates.len() {
+            return false;
+        }
+        let mut entries = Vec::new();
+        for rejection in rejected {
+            let Some(candidate) = candidates.get(rejection.candidate_index) else {
+                return false;
+            };
+            let Some(failure) = rejection.mapping_failure.as_ref() else {
+                return false;
+            };
+            if failure.errors.iter().any(|error| {
+                !matches!(
+                    error,
+                    CallArgMappingError::MissingRequired { .. }
+                        | CallArgMappingError::NoParameterNamed { .. }
+                )
+            }) {
+                return false;
+            }
+            let mut reasons = Vec::new();
+            for error in &failure.errors {
+                match error {
+                    CallArgMappingError::MissingRequired { name } => {
+                        reasons.push(format!("No value passed for parameter '{name}'."));
+                    }
+                    CallArgMappingError::NoParameterNamed { name, .. } => {
+                        reasons.push(format!("No parameter with name '{name}' found."));
+                    }
+                    _ => return false,
+                }
+            }
+            if reasons.is_empty() {
+                return false;
+            }
+            let Some(signature) = self.constructor_candidate_signature(scope, class, candidate)
+            else {
+                return false;
+            };
+            entries.push((signature, reasons));
+        }
+        let mut message = String::from("none of the following candidates is applicable:");
+        for (signature, reasons) in entries {
+            message.push_str(&format!("\n\n{signature}:"));
+            for reason in reasons {
+                message.push_str(&format!("\n  {reason}"));
+            }
+        }
+        let span = self
+            .delegation_keyword_span(class, secondary)
+            .unwrap_or(span);
+        self.diags.error(span, message);
+        true
+    }
+
+    /// A selected delegation that fills defaults the target cannot evaluate. A `this(...)` cycle is
+    /// reported by the caller when the selected candidate is the delegating constructor.
+    pub(super) fn report_selected_delegation_diagnostic(
+        &mut self,
+        span: Span,
+        selected: &ResolvedCtorDelegation,
+    ) -> bool {
+        if !selected.omitted.is_empty() && selected.default_masks.is_empty() {
+            self.diags.error(
+                span,
+                "constructor delegation cannot omit defaults for this target".to_string(),
+            );
+            return true;
+        }
+        false
+    }
+
+    /// The delegating constructor, when `delegating` is that secondary's index.
+    pub(super) fn selected_constructor_is_delegating(
+        candidates: &[CtorDelegationCandidate],
+        candidate_index: usize,
+        delegating: Option<usize>,
+    ) -> bool {
+        let Some(secondary) = delegating else {
+            return false;
+        };
+        matches!(
+            candidates
+                .get(candidate_index)
+                .map(|candidate| &candidate.target),
+            Some(ResolvedCtorDelegationTarget::ThisSecondary { index, .. }) if *index == secondary
+        )
+    }
+
+    /// A delegation chain that returns to a constructor. kotlinc reports that at every `this` in
+    /// the chain. The delegating constructor's own span is the fallback when it wrote no keyword.
+    pub(super) fn report_constructor_delegation_cycle(
+        &mut self,
+        declaration: &ClassDecl,
+        cycle: &[usize],
+    ) {
+        for &index in cycle {
+            let Some(constructor) = declaration.secondary_ctors.get(index) else {
+                continue;
+            };
+            let span = if constructor.delegation_keyword.lo != 0 {
+                constructor.delegation_keyword
+            } else {
+                constructor.span
+            };
+            self.diags
+                .error(span, "there's a cycle in the delegation calls chain.");
+        }
+    }
+
+    /// The written `this` or `super`. Delegation argument errors point there.
+    pub(super) fn delegation_keyword_span(&self, class: DeclId, secondary: usize) -> Option<Span> {
+        let Decl::Class(classifier) = self.file.decl(class) else {
+            return None;
+        };
+        let keyword = classifier
+            .secondary_ctors
+            .get(secondary)?
+            .delegation_keyword;
+        (keyword.lo != 0).then_some(keyword)
+    }
+
+    /// Pick the constructor overload a delegation or construction call resolved to.
+    ///
+    /// The delegating constructor is an ordinary candidate. A `String` parameter forwarded to
+    /// `Any` is a cycle: `String` is more specific, so the constructor accepts the call itself.
+    /// An explicit `as Any` is what selects the erased parameter.
+    pub(super) fn choose_scored_source_constructor(
+        &self,
+        arguments: &CtorDelegationCall,
+        candidates: &[CtorDelegationCandidate],
+        mut scored: Vec<super::source_constructors::ScoredSourceConstructor>,
+        rejected: Vec<ConstructorCandidateRejection>,
+    ) -> SourceConstructorSelection {
+        if scored.iter().any(|candidate| !candidate.low_priority) {
+            scored.retain(|candidate| !candidate.low_priority);
+        }
+        let constraint_shapes = scored
+            .iter()
+            .map(|candidate| Self::constructor_constraint_shape(candidates, candidate))
+            .collect::<Vec<_>>();
+        let undominated = constraint_shapes
+            .iter()
+            .enumerate()
+            .map(|(index, shape)| {
+                !constraint_shapes
+                    .iter()
+                    .enumerate()
+                    .any(|(other_index, other)| {
+                        index != other_index && Self::constraint_shape_dominates(other, shape)
+                    })
+            })
+            .collect::<Vec<_>>();
+        if undominated.iter().any(|keep| !keep) {
+            scored = scored
+                .into_iter()
+                .zip(undominated)
+                .filter_map(|(candidate, keep)| keep.then_some(candidate))
+                .collect();
+        }
+        let Some(best) = scored.iter().map(|candidate| candidate.rank.0).max() else {
+            let mismatch = (candidates.len() == 1)
+                .then(|| {
+                    rejected
+                        .iter()
+                        .find(|rejection| rejection.candidate_index == 0)?
+                        .first
+                })
+                .flatten();
+            return SourceConstructorSelection::NoMatch { mismatch, rejected };
+        };
+        scored.retain(|candidate| candidate.rank.0 == best);
+        self.retain_without_equally_specific_tie_break_loss(&mut scored);
+        let (candidate_index, resolved) = if let [candidate] = scored.as_slice() {
+            (candidate.index, candidate.resolved.clone())
+        } else {
+            // Kotlin compares the parameters the supplied arguments map to, in argument order
+            // (FIR's flat signature of the argument mapping), exactly as at a function call. A
+            // parameter left to its default takes no part, a named argument compares against the
+            // parameter it names, and each vararg element against the element type.
+            let parameter_shapes = scored
+                .iter()
+                .map(|candidate| candidate.resolved.argument_types.clone())
+                .collect::<Vec<_>>();
+            let argument_kinds = arguments
+                .args
+                .iter()
+                .map(|argument| {
+                    super::integer_constants::call_arg_kind(
+                        self.file,
+                        *argument,
+                        self.expr_types[argument.0 as usize],
+                    )
+                })
+                .collect::<Vec<_>>();
+            match crate::symbol_resolver::most_specific_parameter_shape_index(
+                &self.fed_source(),
+                &parameter_shapes,
+                &argument_kinds,
+            ) {
+                crate::symbol_resolver::CandidateSelection::Selected(index) => {
+                    (scored[index].index, scored[index].resolved.clone())
+                }
+                crate::symbol_resolver::CandidateSelection::Ambiguous
+                | crate::symbol_resolver::CandidateSelection::None => {
+                    // Inference can make two applied parameter vectors identical even though one
+                    // declaration keeps a stricter outer shape: `C<T>(List<T>)` is more specific
+                    // than `C<T>(T)` for a `List<String>` argument. Compare the retained
+                    // declaration constraints only after ordinary semantic specificity ties; they
+                    // never make an inapplicable constructor applicable.
+                    let constraint_shapes = scored
+                        .iter()
+                        .map(|candidate| Self::constructor_constraint_shape(candidates, candidate))
+                        .collect::<Vec<_>>();
+                    let mut unique = None;
+                    for (index, shape) in constraint_shapes.iter().enumerate() {
+                        let dominated =
+                            constraint_shapes
+                                .iter()
+                                .enumerate()
+                                .any(|(other_index, other)| {
+                                    index != other_index
+                                        && Self::constraint_shape_dominates(other, shape)
+                                });
+                        if !dominated && unique.replace(index).is_some() {
+                            unique = None;
+                            break;
+                        }
+                    }
+                    if let Some(index) = unique {
+                        (scored[index].index, scored[index].resolved.clone())
+                    } else {
+                        return SourceConstructorSelection::Ambiguous {
+                            tied: scored.iter().map(|candidate| candidate.index).collect(),
+                        };
+                    }
+                }
+            }
+        };
+        SourceConstructorSelection::Selected {
+            candidate_index,
+            resolved: Box::new(resolved),
+        }
+    }
+
+    /// Apply the shared shape tie-break. A more specific constructor is kept: `this(1)` beside
+    /// `(x: Int, y: Int = 2)` and `(z: Long)` selects the `Int` one.
+    fn retain_without_equally_specific_tie_break_loss(
+        &self,
+        scored: &mut Vec<super::source_constructors::ScoredSourceConstructor>,
+    ) {
+        if scored.len() < 2 {
+            return;
+        }
+        let source = self.fed_source();
+        let dominated = scored
+            .iter()
+            .map(|candidate| {
+                scored.iter().any(|other| {
+                    crate::symbol_resolver::fixed_arity_then_fewer_omitted_defaults(
+                        other.rank.2,
+                        other.rank.1 .0,
+                        candidate.rank.2,
+                        candidate.rank.1 .0,
+                    ) && crate::symbol_resolver::declarations_equally_specific(
+                        &source,
+                        (None, &candidate.resolved.argument_types),
+                        (None, &other.resolved.argument_types),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut dominated = dominated.into_iter();
+        scored.retain(|_| !dominated.next().unwrap_or(false));
+    }
+
+    fn constructor_constraint_shape(
+        candidates: &[CtorDelegationCandidate],
+        candidate: &super::source_constructors::ScoredSourceConstructor,
+    ) -> Vec<usize> {
+        candidate
+            .resolved
+            .argument_slots
+            .iter()
+            .map(|slot| {
+                candidates[candidate.index]
+                    .parameter_constraints
+                    .get(*slot)
+                    .copied()
+                    .map(Self::constraint_specificity)
+                    .unwrap_or(0)
+            })
+            .collect()
+    }
+
+    fn constraint_specificity(constraint: ConstructorParameterConstraint) -> usize {
+        match constraint {
+            ConstructorParameterConstraint::Concrete => 2,
+            ConstructorParameterConstraint::GenericConstructed
+            | ConstructorParameterConstraint::GenericFunction => 1,
+            ConstructorParameterConstraint::Inferred => 0,
+        }
+    }
+
+    fn constraint_shape_dominates(other: &[usize], shape: &[usize]) -> bool {
+        other.len() == shape.len()
+            && other.iter().zip(shape).all(|(left, right)| left >= right)
+            && other.iter().zip(shape).any(|(left, right)| left > right)
+    }
+
+    /// The parameter an already-placed argument is checked against, and the mismatch when it does
+    /// not fit. `Error` suppresses a cascade, except a lambda literal whose placeholder is `Error`
+    /// until overload selection gives it a function slot.
+    fn checked_constructor_argument(
+        &self,
+        scope: &CheckerScope<'_>,
+        arguments: &CtorDelegationCall,
+        candidate: &CtorDelegationCandidate,
+        source: usize,
+        argument: ExprId,
+        slot: usize,
+    ) -> Option<CheckedConstructorArgument> {
+        let parameter = candidate.target.params().get(slot).copied()?;
+        let expected = if candidate.vararg == Some(slot)
+            && !self.file.is_spread_arg(argument)
+            && arguments
+                .names
+                .get(source)
+                .is_none_or(|name| name.is_none())
+        {
+            parameter.array_read_elem()?
+        } else if candidate.vararg != Some(slot) && self.file.is_spread_arg(argument) {
+            return None;
+        } else {
+            parameter
+        };
+        let nominal = self.expr_types.get(argument.0 as usize).copied()?;
+        let actual = self.argument_type_for_expected(scope, argument, nominal, expected);
+        let constraint = candidate
+            .parameter_constraints
+            .get(slot)
+            .copied()
+            .unwrap_or_else(|| constructor_parameter_constraint(expected));
+        let lambda_literal = matches!(self.file.expr(argument), Expr::Lambda { .. });
+        let fits = self.constructor_argument_fits(scope, argument, expected, actual, constraint);
+        let mismatch = if (lambda_literal || actual != Ty::Error) && !fits {
+            let implicit_integer_coercion = self.implicit_integer_coercion_applies(
+                argument,
+                expected,
+                candidate
+                    .implicit_integer_coercion
+                    .get(slot)
+                    .copied()
+                    .unwrap_or(false),
+            );
+            if implicit_integer_coercion {
+                None
+            } else {
+                crate::trace_compiler!(
+                    "expected_call",
+                    "constructor argument rejected expression={argument:?} slot={slot} expected={expected:?} actual={actual:?} constraint={constraint:?} variances={:?}",
+                    expected
+                        .obj_internal()
+                        .map(|owner| {
+                            (0..expected.type_args().len())
+                                .map(|index| {
+                                    crate::assignable::TypeOracle::type_param_variance(
+                                        self, owner, index,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                );
+                Some(ConstructorArgumentMismatch {
+                    source_argument: source,
+                    expected,
+                    actual,
+                })
+            }
+        } else {
+            None
+        };
+        Some(CheckedConstructorArgument { expected, mismatch })
+    }
+
+    /// Whether one mapped constructor argument fits its parameter. The success path and an excess
+    /// call that still mapped a prefix share this predicate.
+    fn constructor_argument_fits(
+        &self,
+        scope: &CheckerScope<'_>,
+        argument: ExprId,
+        expected: Ty,
+        actual: Ty,
+        constraint: ConstructorParameterConstraint,
+    ) -> bool {
+        let lambda_literal = matches!(self.file.expr(argument), Expr::Lambda { .. });
+        self.sam_argument_fits(scope, expected, actual, argument)
+            || match constraint {
+                // A lambda literal must first land in a FUNCTION slot; its actual type is contextual
+                // and is checked only after overload selection. Applying this rule here, in the shared
+                // constructor matcher, makes primary/secondary and file/module/classpath delegation
+                // agree instead of teaching the class-header path a private lambda exception.
+                ConstructorParameterConstraint::Concrete if lambda_literal => {
+                    expected.non_null().is_fun() || self.semantic_sam_signature(expected).is_some()
+                }
+                // A numeric argument reaches another primitive slot the same way it does at a function
+                // call (`L(b: Long)` accepts `L(1)`): the emit site inserts the conversion. Subtyping
+                // alone rejected it, so every constructor with a `Long`/`Double`/… parameter was
+                // unreachable from an integer literal — the one call origin that did not admit the
+                // conversion `expect_assignable` applies everywhere else.
+                //
+                // `accepts_numeric` is the shared predicate and is deliberately the SAME one those
+                // origins use, so this inherits their leniency rather than inventing a constructor
+                // rule: it also admits `Int` into `Byte`/`Short`, where kotlinc requires an explicit
+                // conversion. Narrowing that predicate is a project-wide decision (the plain-call and
+                // classpath-constructor origins already take it), not one to fork here.
+                ConstructorParameterConstraint::Concrete => {
+                    self.receiver_is_assignable(actual, expected)
+                        || expected.accepts_numeric(actual)
+                        || self.argument_result_may_bind_expected(scope, argument, expected)
+                }
+                ConstructorParameterConstraint::Inferred => true,
+                ConstructorParameterConstraint::GenericConstructed => {
+                    if actual == Ty::Null {
+                        expected.is_nullable()
+                    } else if actual.is_nullable() && !expected.is_nullable() {
+                        false
+                    } else {
+                        // A function type is an instance of its function classifier
+                        // (`(A) -> R` is `Function1<A, R>`), so it reaches a constructed
+                        // `Function1<F, T>` slot through that classifier.
+                        crate::libraries::function_classifiers::supertype_classifier(
+                            actual.non_null(),
+                        )
+                        .obj_internal()
+                        .zip(expected.non_null().obj_internal())
+                        .is_some_and(|(actual_owner, expected_owner)| {
+                            self.generic_constructed_argument_reaches(
+                                expected,
+                                actual_owner,
+                                expected_owner,
+                            )
+                        })
+                    }
+                }
+                ConstructorParameterConstraint::GenericFunction => {
+                    // A lambda's arity is contextual (an omitted parameter list can mean zero
+                    // parameters or implicit `it`), so its provisional type cannot reject a function
+                    // candidate. Non-lambda values already have a stable function shape and must match.
+                    lambda_literal || self.generic_function_constructor_arg_fits(expected, actual)
+                }
+            }
+    }
+
     pub(super) fn match_ctor_delegation_candidate(
         &self,
         scope: &CheckerScope<'_>,
@@ -170,17 +929,54 @@ impl Checker<'_> {
                 .then_some(arguments.names.as_slice()),
         )?;
         let visible_vararg = contextual.call_sig.vararg_index;
-        let slots = map_call_args(
+        let slots = match map_call_args(
             &arguments.args,
             Some(&arguments.names),
-            &contextual.call_sig.param_names,
-            contextual.params.len(),
-            contextual.call_sig.required,
-            &contextual.call_sig.param_defaults,
-            visible_vararg,
+            crate::libraries::ParameterSlots {
+                names: &contextual.call_sig.param_names,
+                count: contextual.params.len(),
+                required: contextual.call_sig.required,
+                defaults: &contextual.call_sig.param_defaults,
+                vararg: visible_vararg,
+            },
             arguments.trailing_lambda,
-        )
-        .ok()?;
+        ) {
+            Ok(slots) => slots,
+            Err(failure) => {
+                let placed_prefix_mismatches = failure
+                    .errors
+                    .iter()
+                    .any(|error| matches!(error, CallArgMappingError::TooManyArguments { .. }))
+                    && failure.errors.iter().all(|error| {
+                        matches!(
+                            error,
+                            CallArgMappingError::TooManyArguments { .. }
+                                | CallArgMappingError::MissingRequired { .. }
+                        )
+                    });
+                if placed_prefix_mismatches {
+                    for &(source, visible) in &failure.placed {
+                        let Some(&slot) = contextual.parameter_indices.get(visible) else {
+                            continue;
+                        };
+                        let Some(&argument) = arguments.args.get(source) else {
+                            continue;
+                        };
+                        let Some(checked) = self.checked_constructor_argument(
+                            scope, arguments, candidate, source, argument, slot,
+                        ) else {
+                            continue;
+                        };
+                        if let Some(mismatch) = checked.mismatch {
+                            rejection.first.get_or_insert(mismatch);
+                            rejection.mapped_mismatches.push(mismatch);
+                        }
+                    }
+                }
+                rejection.mapping_failure = Some(failure);
+                return None;
+            }
+        };
         let argument_slots = arguments
             .args
             .iter()
@@ -198,21 +994,14 @@ impl Checker<'_> {
         let mut argument_implicit_integer_coercion = Vec::with_capacity(arguments.args.len());
         let mut argument_lambda_receivers = Vec::with_capacity(arguments.args.len());
         for (source, (&argument, &slot)) in arguments.args.iter().zip(&argument_slots).enumerate() {
-            let parameter = *params.get(slot)?;
-            let expected = if candidate.vararg == Some(slot) {
-                if self.file.is_spread_arg(argument)
-                    || arguments.names.get(source).is_some_and(Option::is_some)
-                {
-                    parameter
-                } else {
-                    parameter.array_read_elem()?
-                }
-            } else {
-                if self.file.is_spread_arg(argument) {
-                    return None;
-                }
-                parameter
-            };
+            let checked = self.checked_constructor_argument(
+                scope, arguments, candidate, source, argument, slot,
+            )?;
+            let expected = checked.expected;
+            if let Some(mismatch) = checked.mismatch {
+                rejection.first.get_or_insert(mismatch);
+                mismatches.push(mismatch);
+            }
             let declared_parameter = *candidate.target.declaration_params().get(slot)?;
             let declared = if candidate.vararg == Some(slot)
                 && !self.file.is_spread_arg(argument)
@@ -225,125 +1014,6 @@ impl Checker<'_> {
             } else {
                 declared_parameter
             };
-            let nominal = self.expr_types[argument.0 as usize];
-            let actual = self.argument_type_for_expected(scope, argument, nominal, expected);
-            // Preserve the non-generic shell of a parameter while leaving only its type-variable
-            // components to inference. A direct `T` cannot be judged against its erased non-null `Any`,
-            // but `(Int) -> T` still requires a function of the right shape; otherwise that primary
-            // constructor can enter competition for a String argument and make a valid String secondary
-            // ambiguous.
-            let constraint = candidate
-                .parameter_constraints
-                .get(slot)
-                .copied()
-                .unwrap_or_else(|| {
-                    if !expected.mentions_ty_param() {
-                        ConstructorParameterConstraint::Concrete
-                    } else if expected.non_null().is_fun() {
-                        ConstructorParameterConstraint::GenericFunction
-                    } else {
-                        ConstructorParameterConstraint::Inferred
-                    }
-                });
-            let lambda_literal = matches!(self.file.expr(argument), Expr::Lambda { .. });
-            let fits = self.sam_argument_fits(scope, expected, actual, argument)
-                || match constraint {
-                    // A lambda literal must first land in a FUNCTION slot; its actual type is contextual
-                    // and is checked only after overload selection. Applying this rule here, in the shared
-                    // constructor matcher, makes primary/secondary and file/module/classpath delegation
-                    // agree instead of teaching the class-header path a private lambda exception.
-                    ConstructorParameterConstraint::Concrete if lambda_literal => {
-                        expected.non_null().is_fun()
-                            || self.semantic_sam_signature(expected).is_some()
-                    }
-                    // A numeric argument reaches another primitive slot the same way it does at a function
-                    // call (`L(b: Long)` accepts `L(1)`): the emit site inserts the conversion. Subtyping
-                    // alone rejected it, so every constructor with a `Long`/`Double`/… parameter was
-                    // unreachable from an integer literal — the one call origin that did not admit the
-                    // conversion `expect_assignable` applies everywhere else.
-                    //
-                    // `accepts_numeric` is the shared predicate and is deliberately the SAME one those
-                    // origins use, so this inherits their leniency rather than inventing a constructor
-                    // rule: it also admits `Int` into `Byte`/`Short`, where kotlinc requires an explicit
-                    // conversion. Narrowing that predicate is a project-wide decision (the plain-call and
-                    // classpath-constructor origins already take it), not one to fork here.
-                    ConstructorParameterConstraint::Concrete => {
-                        self.receiver_is_assignable(actual, expected)
-                            || expected.accepts_numeric(actual)
-                            || self.argument_result_may_bind_expected(scope, argument, expected)
-                    }
-                    ConstructorParameterConstraint::Inferred => true,
-                    ConstructorParameterConstraint::GenericConstructed => {
-                        if actual == Ty::Null {
-                            expected.is_nullable()
-                        } else if actual.is_nullable() && !expected.is_nullable() {
-                            false
-                        } else {
-                            // A function type is an instance of its function classifier
-                            // (`(A) -> R` is `Function1<A, R>`), so it reaches a constructed
-                            // `Function1<F, T>` slot through that classifier.
-                            crate::libraries::function_classifiers::supertype_classifier(
-                                actual.non_null(),
-                            )
-                            .obj_internal()
-                            .zip(expected.non_null().obj_internal())
-                            .is_some_and(
-                                |(actual_owner, expected_owner)| {
-                                    self.generic_constructed_argument_reaches(
-                                        expected,
-                                        actual_owner,
-                                        expected_owner,
-                                    )
-                                },
-                            )
-                        }
-                    }
-                    ConstructorParameterConstraint::GenericFunction => {
-                        // A lambda's arity is contextual (an omitted parameter list can mean zero
-                        // parameters or implicit `it`), so its provisional type cannot reject a function
-                        // candidate. Non-lambda values already have a stable function shape and must match.
-                        lambda_literal
-                            || self.generic_function_constructor_arg_fits(expected, actual)
-                    }
-                };
-            // `Error` normally suppresses cascades, but a DEFERRED lambda deliberately uses it as a
-            // placeholder. Its structural function-slot test is therefore authoritative and must
-            // still reject a non-function constructor overload.
-            if (lambda_literal || actual != Ty::Error) && !fits {
-                crate::trace_compiler!(
-                    "expected_call",
-                    "constructor argument rejected expression={argument:?} slot={slot} expected={expected:?} actual={actual:?} constraint={constraint:?} variances={:?}",
-                    expected
-                        .obj_internal()
-                        .map(|owner| {
-                            (0..expected.type_args().len())
-                                .map(|index| {
-                                    crate::assignable::TypeOracle::type_param_variance(
-                                        self, owner, index,
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                );
-                let implicit_integer_coercion = self.implicit_integer_coercion_applies(
-                    argument,
-                    expected,
-                    candidate
-                        .implicit_integer_coercion
-                        .get(slot)
-                        .copied()
-                        .unwrap_or(false),
-                );
-                if !implicit_integer_coercion {
-                    let mismatch = ConstructorArgumentMismatch {
-                        source_argument: source,
-                        expected,
-                        actual,
-                    };
-                    rejection.first.get_or_insert(mismatch);
-                    mismatches.push(mismatch);
-                }
-            }
             argument_types.push(expected);
             argument_declared_types.push(declared);
             argument_implicit_integer_coercion.push(

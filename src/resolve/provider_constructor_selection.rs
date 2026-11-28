@@ -156,11 +156,7 @@ impl Checker<'_> {
         let names = arg_names
             .map(<[Option<String>]>::to_vec)
             .unwrap_or_else(|| vec![None; args.len()]);
-        let arguments = CtorDelegationCall {
-            args: args.to_vec(),
-            names,
-            trailing_lambda,
-        };
+        let arguments = CtorDelegationCall::new(args.to_vec(), names, trailing_lambda);
         let applied_classifier = self.alias_constructor_fixed_application(call, applied_classifier);
         let explicit_type_arguments = applied_classifier
             .filter(|applied| {
@@ -729,7 +725,7 @@ impl Checker<'_> {
         }
 
         let (candidate_index, selected) =
-            match self.select_source_constructor(scope, &arguments, &candidates) {
+            match self.select_source_constructor(scope, &arguments, &candidates, false) {
                 SourceConstructorSelection::Selected {
                     candidate_index,
                     resolved,
@@ -804,7 +800,7 @@ impl Checker<'_> {
                     });
                     return Ok(LibraryConstructorSelection::NoMatch(rejections));
                 }
-                SourceConstructorSelection::Ambiguous => {
+                SourceConstructorSelection::Ambiguous { .. } => {
                     return Ok(LibraryConstructorSelection::NoMatch(None));
                 }
             };

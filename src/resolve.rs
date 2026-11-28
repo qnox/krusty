@@ -1153,11 +1153,7 @@ pub(crate) fn map_call_sig_args_with_trailing(
     map_call_args(
         args,
         names,
-        &sig.param_names,
-        parameter_count,
-        sig.required,
-        &sig.param_defaults,
-        sig.vararg_index,
+        crate::libraries::ParameterSlots::of(sig, parameter_count),
         trailing_lambda,
     )
 }
@@ -1187,11 +1183,13 @@ fn map_param_list_args(
     map_call_args(
         args,
         names,
-        &params.names,
-        params.names.len(),
-        required_arity(params.names.len(), &params.defaults),
-        &params.defaults,
-        params.vararg,
+        crate::libraries::ParameterSlots {
+            names: &params.names,
+            count: params.names.len(),
+            required: required_arity(params.names.len(), &params.defaults),
+            defaults: &params.defaults,
+            vararg: params.vararg,
+        },
         trailing_lambda,
     )
 }
@@ -7896,16 +7894,16 @@ impl<'a> Checker<'a> {
                         arg_tys[index] = actual;
                     }
                     let names = arg_names.clone().unwrap_or_else(|| vec![None; args.len()]);
-                    let arguments = CtorDelegationCall {
-                        args: args.to_vec(),
+                    let arguments = CtorDelegationCall::new(
+                        args.to_vec(),
                         names,
-                        trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
-                    };
+                        self.file.call_has_trailing_lambda.contains(&call.0),
+                    );
                     let candidates =
                         self.source_constructor_candidates(scope, declaration.as_ref(), &cls);
                     if let SourceConstructorSelection::Selected {
                         resolved: selected, ..
-                    } = self.select_source_constructor(scope, &arguments, &candidates)
+                    } = self.select_source_constructor(scope, &arguments, &candidates, false)
                     {
                         let selected = *selected;
                         return self.finish_source_constructor_call(
@@ -12219,14 +12217,11 @@ impl<'a> Checker<'a> {
                             let declaration =
                                 self.source_class_decl_by_internal(cls.internal_name());
                             let names = arg_names.clone().unwrap_or_else(|| vec![None; args.len()]);
-                            let arguments = CtorDelegationCall {
-                                args: args.to_vec(),
+                            let arguments = CtorDelegationCall::new(
+                                args.to_vec(),
                                 names,
-                                trailing_lambda: self
-                                    .file
-                                    .call_has_trailing_lambda
-                                    .contains(&call.0),
-                            };
+                                self.file.call_has_trailing_lambda.contains(&call.0),
+                            );
                             let candidates = self.source_constructor_candidates(
                                 scope,
                                 declaration.as_ref(),
@@ -12243,6 +12238,7 @@ impl<'a> Checker<'a> {
                                         scope,
                                         &arguments,
                                         &candidates,
+                                        false,
                                     ) {
                                         SourceConstructorSelection::Selected {
                                             resolved: selected,
@@ -12254,7 +12250,7 @@ impl<'a> Checker<'a> {
                                             constructor_rejections = rejected;
                                             None
                                         }
-                                        SourceConstructorSelection::Ambiguous => None,
+                                        SourceConstructorSelection::Ambiguous { .. } => None,
                                     }
                                 })
                                 .flatten();
@@ -13209,16 +13205,18 @@ impl<'a> Checker<'a> {
                             if let Err(error) = map_call_args(
                                 args,
                                 arg_names.as_deref(),
-                                &signature.param_names[context_count..],
-                                value_count,
-                                signature.required.saturating_sub(context_count),
-                                signature
-                                    .param_defaults
-                                    .get(context_count..)
-                                    .unwrap_or_default(),
-                                signature
-                                    .vararg_index
-                                    .and_then(|index| index.checked_sub(context_count)),
+                                crate::libraries::ParameterSlots {
+                                    names: &signature.param_names[context_count..],
+                                    count: value_count,
+                                    required: signature.required.saturating_sub(context_count),
+                                    defaults: signature
+                                        .param_defaults
+                                        .get(context_count..)
+                                        .unwrap_or_default(),
+                                    vararg: signature
+                                        .vararg_index
+                                        .and_then(|index| index.checked_sub(context_count)),
+                                },
                                 trailing_lambda,
                             ) {
                                 self.report_call_arg_mapping_error(call, args, error);
@@ -20297,27 +20295,56 @@ fun box(): String {
 
     #[test]
     fn unknown_named_argument_diagnostic_is_consistent_across_call_origins() {
-        let cases = [
-            "fun bad(): String = knownTop(z = \"x\")",
-            "fun bad(): String = \"\".known(z = 1)",
-            "import test.tag\nfun bad(): String = \"\".tag(z = 1)",
-            "class Outer { class Inner(val a: Int) }\n\
-             fun bad(): Outer.Inner = Outer.Inner(z = 1)",
+        // kotlinc names each unfilled required parameter, then the unknown argument name.
+        // `known` leaves `b` unreported because that parameter has a default.
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "fun bad(): String = knownTop(z = \"x\")",
+                &[
+                    "no value passed for parameter 'a'.",
+                    "no value passed for parameter 'b'.",
+                    "no parameter with name 'z' found.",
+                ],
+            ),
+            (
+                "fun bad(): String = \"\".known(z = 1)",
+                &[
+                    "no value passed for parameter 'a'.",
+                    "no parameter with name 'z' found.",
+                ],
+            ),
+            (
+                "import test.tag\nfun bad(): String = \"\".tag(z = 1)",
+                &[
+                    "no value passed for parameter 'a'.",
+                    "no parameter with name 'z' found.",
+                ],
+            ),
+            (
+                "class Outer { class Inner(val a: Int) }\n\
+                 fun bad(): Outer.Inner = Outer.Inner(z = 1)",
+                &[
+                    "no value passed for parameter 'a'.",
+                    "no parameter with name 'z' found.",
+                ],
+            ),
         ];
-        for source in cases {
+        for (source, expected) in cases {
             let (_, _, diagnostics) =
                 retained_platform_analysis(source, Box::new(FakeMemberPlatform));
-
+            let messages: Vec<_> = diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect();
+            assert_eq!(messages, *expected, "{source}");
+            let unknown = diagnostics
+                .diags
+                .iter()
+                .find(|diagnostic| diagnostic.msg == "no parameter with name 'z' found.")
+                .expect("unknown-name diagnostic");
             assert_eq!(
-                diagnostics.diags.len(),
-                1,
-                "{source}: {:?}",
-                diagnostics.diags
-            );
-            let diagnostic = &diagnostics.diags[0];
-            assert_eq!(diagnostic.msg, "no parameter with name 'z' found.");
-            assert_eq!(
-                &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
+                &source[unknown.span.lo as usize..unknown.span.hi as usize],
                 "z"
             );
         }
@@ -21807,40 +21834,11 @@ fun use() {
     }
 
     #[test]
-    fn call_argument_mapping_collects_structural_and_missing_errors() {
-        let args = [ExprId(0), ExprId(1), ExprId(2)];
-        let names = [Some("third".to_string()), None, Some("unknown".to_string())];
-        let params = ["first", "second", "third"].map(str::to_string);
-
-        let failure = map_call_args(
-            &args,
-            Some(&names),
-            &params,
-            params.len(),
-            3,
-            &[],
-            None,
-            false,
-        )
-        .expect_err("reordered named argument followed by a positional argument");
-
-        assert_eq!(
-            failure.errors,
-            vec![
-                CallArgMappingError::PositionalAfterNamed { argument: 1 },
-                CallArgMappingError::NoParameterNamed {
-                    name: "unknown".to_string(),
-                    argument: 2,
-                },
-            ]
-        );
-    }
-
-    #[test]
     fn call_argument_mapping_recovery_requires_overload_unanimity() {
         let duplicate = CallArgMappingFailure {
             errors: vec![CallArgMappingError::AlreadyPassed { argument: 1 }],
             recovery_argument: None,
+            placed: Vec::new(),
         };
         let unknown = CallArgMappingFailure {
             errors: vec![CallArgMappingError::NoParameterNamed {
@@ -21848,6 +21846,7 @@ fun use() {
                 argument: 0,
             }],
             recovery_argument: None,
+            placed: Vec::new(),
         };
 
         for mut conflicts in [
@@ -21861,62 +21860,6 @@ fun use() {
         assert_eq!(
             take_unanimous_mapping_error(&mut unanimous).map(|(failure, _)| failure),
             Some(duplicate)
-        );
-    }
-
-    #[test]
-    fn call_argument_mapping_accepts_matching_positional_order() {
-        let args = [ExprId(0), ExprId(1)];
-        let names = [Some("first".to_string()), None];
-        let params = ["first", "second"].map(str::to_string);
-
-        assert_eq!(
-            map_call_args(
-                &args,
-                Some(&names),
-                &params,
-                params.len(),
-                2,
-                &[],
-                None,
-                false,
-            ),
-            Ok(vec![Some(args[0]), Some(args[1])])
-        );
-    }
-
-    #[test]
-    fn call_argument_mapping_rejects_trailing_lambda_for_final_vararg() {
-        let args = [ExprId(0), ExprId(1)];
-        let params = ["prefix", "actions"].map(str::to_string);
-
-        let failure = map_call_args(&args, None, &params, params.len(), 2, &[], Some(1), true)
-            .expect_err("a trailing lambda cannot supply a final vararg");
-
-        assert_eq!(
-            failure.errors,
-            vec![CallArgMappingError::TrailingLambdaOnVararg { argument: 1 }]
-        );
-    }
-
-    #[test]
-    fn call_argument_mapping_treats_non_final_vararg_as_optional() {
-        let args = [ExprId(0)];
-        let names = [Some("tail".to_string())];
-        let params = ["values", "tail"].map(str::to_string);
-
-        assert_eq!(
-            map_call_args(
-                &args,
-                Some(&names),
-                &params,
-                params.len(),
-                2,
-                &[],
-                Some(0),
-                false,
-            ),
-            Ok(vec![None, Some(args[0])])
         );
     }
 
@@ -25419,14 +25362,13 @@ struct MemberExtensionFunctionShape {
     owner: TypeName,
 }
 
-/// Which secondary constructor's delegation is being resolved, and how to report it: the `this`/`super`
-/// label and span identify the clause, `value_class` selects the value-class rules. Grouped so the entry
-/// point stays under the argument-count lint.
-struct CtorDelegationSite<'a> {
+/// Which secondary constructor's delegation is being resolved. `delegates_to_this` is the
+/// `CtorDelegation::This` arm.
+struct CtorDelegationSite {
     class: DeclId,
     secondary: usize,
     span: Span,
-    label: &'a str,
+    delegates_to_this: bool,
 }
 
 /// The arguments of a member-EXTENSION call, grouped so the resolution entry point stays under the
@@ -30875,7 +30817,6 @@ impl<'a> Checker<'a> {
         &self,
         scope: &CheckerScope<'_>,
         class: &ClassDecl,
-        secondary: usize,
         primary_params: &[Ty],
         secondary_params: &[Vec<Ty>],
         supports_default_abi: bool,
@@ -30932,9 +30873,6 @@ impl<'a> Checker<'a> {
             });
         }
         for (index, constructor) in class.secondary_ctors.iter().enumerate() {
-            if index == secondary {
-                continue;
-            }
             let params = &secondary_params[index];
             let secondary_context_count = class
                 .context_params
@@ -30994,6 +30932,7 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         arguments: &CtorDelegationCall,
         candidates: &[CtorDelegationCandidate],
+        equate_unresolved: bool,
     ) -> SourceConstructorSelection {
         let partial = arguments
             .args
@@ -31068,149 +31007,18 @@ impl<'a> Checker<'a> {
                     },
                 )
                 .map_or((0, std::cmp::Reverse(0), true), |score| score.rank);
-                Some((candidate.low_priority, rank, candidate_index, selected))
-            })
-            .collect::<Vec<_>>();
-        if scored.iter().any(|candidate| !candidate.0) {
-            scored.retain(|candidate| !candidate.0);
-        }
-        let constraint_rank = |constraint: ConstructorParameterConstraint| match constraint {
-            ConstructorParameterConstraint::Concrete => 2,
-            ConstructorParameterConstraint::GenericConstructed
-            | ConstructorParameterConstraint::GenericFunction => 1,
-            ConstructorParameterConstraint::Inferred => 0,
-        };
-        let constraint_shapes = scored
-            .iter()
-            .map(|(_, _, candidate_index, selected)| {
-                selected
-                    .argument_slots
-                    .iter()
-                    .map(|slot| {
-                        candidates[*candidate_index]
-                            .parameter_constraints
-                            .get(*slot)
-                            .copied()
-                            .map(constraint_rank)
-                            .unwrap_or(0)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        let undominated = constraint_shapes
-            .iter()
-            .enumerate()
-            .map(|(index, shape)| {
-                !constraint_shapes
-                    .iter()
-                    .enumerate()
-                    .any(|(other_index, other)| {
-                        index != other_index
-                            && other.len() == shape.len()
-                            && other.iter().zip(shape).all(|(left, right)| left >= right)
-                            && other.iter().zip(shape).any(|(left, right)| left > right)
-                    })
-            })
-            .collect::<Vec<_>>();
-        if undominated.iter().any(|keep| !keep) {
-            scored = scored
-                .into_iter()
-                .zip(undominated)
-                .filter_map(|(candidate, keep)| keep.then_some(candidate))
-                .collect();
-        }
-        let Some(best) = scored.iter().map(|candidate| candidate.1).max() else {
-            let mismatch = (candidates.len() == 1)
-                .then(|| {
-                    rejected
-                        .iter()
-                        .find(|rejection| rejection.candidate_index == 0)?
-                        .first
+                Some(source_constructors::ScoredSourceConstructor {
+                    low_priority: candidate.low_priority,
+                    rank,
+                    index: candidate_index,
+                    resolved: selected,
                 })
-                .flatten();
-            return SourceConstructorSelection::NoMatch { mismatch, rejected };
-        };
-        scored.retain(|candidate| candidate.1 == best);
-        let selected = if let [(_, _, candidate_index, selected)] = scored.as_slice() {
-            (*candidate_index, selected)
-        } else {
-            // Kotlin compares the parameters the supplied arguments map to, in argument order
-            // (FIR's flat signature of the argument mapping), exactly as at a function call. A
-            // parameter left to its default takes no part, a named argument compares against the
-            // parameter it names, and each vararg element against the element type.
-            let parameter_shapes = scored
-                .iter()
-                .map(|(_, _, _, selected)| selected.argument_types.clone())
-                .collect::<Vec<_>>();
-            let argument_kinds = arguments
-                .args
-                .iter()
-                .map(|argument| {
-                    call_arg_kind(self.file, *argument, self.expr_types[argument.0 as usize])
-                })
-                .collect::<Vec<_>>();
-            match crate::symbol_resolver::most_specific_parameter_shape_index(
-                &self.fed_source(),
-                &parameter_shapes,
-                &argument_kinds,
-            ) {
-                crate::symbol_resolver::CandidateSelection::Selected(index) => {
-                    (scored[index].2, &scored[index].3)
-                }
-                crate::symbol_resolver::CandidateSelection::Ambiguous
-                | crate::symbol_resolver::CandidateSelection::None => {
-                    // Inference can make two applied parameter vectors identical even though one
-                    // declaration keeps a stricter outer shape: `C<T>(List<T>)` is more specific than
-                    // `C<T>(T)` for a `List<String>` argument. Compare the retained declaration
-                    // constraints only after ordinary semantic specificity ties; they never make an
-                    // inapplicable constructor applicable.
-                    let constraint_shapes = scored
-                        .iter()
-                        .map(|(_, _, candidate_index, selected)| {
-                            selected
-                                .argument_slots
-                                .iter()
-                                .map(|slot| {
-                                    candidates[*candidate_index]
-                                        .parameter_constraints
-                                        .get(*slot)
-                                        .copied()
-                                        .map(constraint_rank)
-                                        .unwrap_or(0)
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .collect::<Vec<_>>();
-                    let mut unique = None;
-                    for (index, shape) in constraint_shapes.iter().enumerate() {
-                        let dominated =
-                            constraint_shapes
-                                .iter()
-                                .enumerate()
-                                .any(|(other_index, other)| {
-                                    index != other_index
-                                        && other.len() == shape.len()
-                                        && other
-                                            .iter()
-                                            .zip(shape)
-                                            .all(|(left, right)| left >= right)
-                                        && other.iter().zip(shape).any(|(left, right)| left > right)
-                                });
-                        if !dominated && unique.replace(index).is_some() {
-                            return SourceConstructorSelection::Ambiguous;
-                        }
-                    }
-                    let Some(index) = unique else {
-                        return SourceConstructorSelection::Ambiguous;
-                    };
-                    (scored[index].2, &scored[index].3)
-                }
-            }
-        };
-        SourceConstructorSelection::Selected {
-            candidate_index: selected.0,
-            resolved: Box::new(selected.1.clone()),
+            })
+            .collect::<Vec<_>>();
+        if equate_unresolved {
+            source_constructors::equate_unresolved_constructor_scores(&mut scored);
         }
+        self.choose_scored_source_constructor(arguments, candidates, scored, rejected)
     }
 
     fn super_ctor_delegation_candidates(
@@ -31346,7 +31154,7 @@ impl<'a> Checker<'a> {
     fn select_ctor_delegation(
         &mut self,
         scope: &CheckerScope<'_>,
-        site: CtorDelegationSite<'_>,
+        site: CtorDelegationSite,
         arguments: &CtorDelegationCall,
         candidates: Vec<CtorDelegationCandidate>,
     ) {
@@ -31354,32 +31162,51 @@ impl<'a> Checker<'a> {
             class,
             secondary,
             span,
-            label,
+            delegates_to_this,
         } = site;
-        let selected = match self.select_source_constructor(scope, arguments, &candidates) {
+        if self.note_supertype_initialization_without_primary(class) {
+            return;
+        }
+        let delegating = delegates_to_this.then_some(secondary);
+        let selected = match self.select_source_constructor(scope, arguments, &candidates, true) {
             SourceConstructorSelection::Selected {
-                resolved: selected, ..
-            } => *selected,
+                candidate_index,
+                resolved: selected,
+            } => {
+                if Self::selected_constructor_is_delegating(
+                    &candidates,
+                    candidate_index,
+                    delegating,
+                ) {
+                    let span = self
+                        .delegation_keyword_span(class, secondary)
+                        .unwrap_or(span);
+                    self.diags
+                        .error(span, "there's a cycle in the delegation calls chain.");
+                    return;
+                }
+                *selected
+            }
             SourceConstructorSelection::NoMatch { rejected, .. } => {
-                if !self.report_single_constructor_argument_mismatches(
+                self.report_rejected_delegation(
                     scope,
                     arguments,
                     &candidates,
                     &rejected,
-                ) {
-                    self.diags.error(
-                        span,
-                        format!("krusty: {label}(...) has no matching target constructor"),
-                    );
-                }
+                    (class, secondary, span),
+                );
                 return;
             }
-            SourceConstructorSelection::Ambiguous => {
-                self.diags.error(
+            SourceConstructorSelection::Ambiguous { tied } => {
+                let span = self
+                    .delegation_keyword_span(class, secondary)
+                    .unwrap_or(span);
+                self.report_ambiguous_constructor_delegation(
+                    scope,
+                    class,
                     span,
-                    format!(
-                        "overload resolution ambiguity for {label}(...) constructor delegation"
-                    ),
+                    &candidates,
+                    &tied,
                 );
                 return;
             }
@@ -31387,11 +31214,7 @@ impl<'a> Checker<'a> {
         if let Some(receiver) = &selected.outer_receiver {
             self.mark_selected_implicit_receiver_used(scope, receiver, class);
         }
-        if !selected.omitted.is_empty() && selected.default_masks.is_empty() {
-            self.diags.error(
-                span,
-                "constructor delegation cannot omit defaults for this target".to_string(),
-            );
+        if self.report_selected_delegation_diagnostic(span, &selected) {
             return;
         }
         for (index, ((&argument, &expected), &declared)) in arguments
@@ -31470,12 +31293,7 @@ impl<'a> Checker<'a> {
             })
             .collect::<Vec<_>>();
         for cycle in constructor_delegation_cycles(&edges) {
-            if let Some(&index) = cycle.first() {
-                self.diags.error(
-                    declaration.secondary_ctors[index].span,
-                    "constructor delegation cycle".to_string(),
-                );
-            }
+            self.report_constructor_delegation_cycle(declaration, &cycle);
             for index in cycle {
                 self.resolved_ctor_delegations.remove(&(class, index));
             }
@@ -35392,29 +35210,10 @@ impl<'a> Checker<'a> {
                                     }
                                     None => return None,
                                 };
-                                let secondary = cl
-                                    .secondary_ctors
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(ordinal, _)| {
-                                        let sibling = u32::try_from(ordinal + 1)
-                                            .expect("too many secondary constructors");
-                                        index
-                                            .owned_declaration(
-                                                owner,
-                                                crate::fir::DeclarationKind::Constructor,
-                                                sibling,
-                                            )
-                                            .and_then(|declaration| index.signature(declaration))
-                                            .map(|signature| {
-                                                signature
-                                                    .parameters
-                                                    .iter()
-                                                    .map(|parameter| parameter.get())
-                                                    .collect::<Vec<_>>()
-                                            })
-                                    })
-                                    .collect::<Option<Vec<_>>>()?;
+                                let secondary =
+                                    source_constructors::published_secondary_parameter_shapes(
+                                        index, owner, cl,
+                                    )?;
                                 Some((primary, source_primary, secondary))
                             },
                         )
@@ -35709,7 +35508,6 @@ impl<'a> Checker<'a> {
                         let candidates = c.this_ctor_delegation_candidates(
                             delegation_scope,
                             cl,
-                            sc_index,
                             &primary_params,
                             &secondary_params,
                             // An unboxed value class has no ordinary `$default` constructor. A boxed
@@ -35735,8 +35533,12 @@ impl<'a> Checker<'a> {
                             CtorDelegationSite {
                                 class: d,
                                 secondary: sc_index,
-                                span: sc.span,
-                                label: "this",
+                                span: if sc.delegation_keyword.lo == 0 {
+                                    sc.span
+                                } else {
+                                    sc.delegation_keyword
+                                },
+                                delegates_to_this: true,
                             },
                             delegation,
                             candidates,
@@ -35751,7 +35553,7 @@ impl<'a> Checker<'a> {
                                 class: d,
                                 secondary: sc_index,
                                 span: sc.span,
-                                label: "super",
+                                delegates_to_this: false,
                             },
                             delegation,
                             candidates,
@@ -35762,11 +35564,7 @@ impl<'a> Checker<'a> {
                     // There is therefore no source constructor call to select or record here.
                     CtorDelegation::None if cl.is_enum() => {}
                     CtorDelegation::None if cl.primary_ctor_annotations.is_none() => {
-                        let arguments = CtorDelegationCall {
-                            args: Vec::new(),
-                            names: Vec::new(),
-                            trailing_lambda: false,
-                        };
+                        let arguments = CtorDelegationCall::new(Vec::new(), Vec::new(), false);
                         let candidates = c.super_ctor_delegation_candidates(current_owner);
                         c.select_ctor_delegation(
                             delegation_scope,
@@ -35774,7 +35572,7 @@ impl<'a> Checker<'a> {
                                 class: d,
                                 secondary: sc_index,
                                 span: sc.span,
-                                label: "super",
+                                delegates_to_this: false,
                             },
                             &arguments,
                             candidates,
@@ -36768,15 +36566,13 @@ impl<'a> Checker<'a> {
                         self.expr(scope, argument);
                     }
                 }
-                let arguments = CtorDelegationCall {
-                    args: entry.args.clone(),
-                    names: entry.arg_names.clone(),
-                    trailing_lambda: false,
-                };
+                let arguments =
+                    CtorDelegationCall::new(entry.args.clone(), entry.arg_names.clone(), false);
                 let selected = match self.select_source_constructor(
                     scope,
                     &arguments,
                     &constructor_candidates,
+                    false,
                 ) {
                     SourceConstructorSelection::Selected { resolved, .. } => {
                         self.record_whole_array_delegation_arguments(&arguments, &resolved);
@@ -36802,7 +36598,7 @@ impl<'a> Checker<'a> {
                         }
                         continue;
                     }
-                    SourceConstructorSelection::Ambiguous => {
+                    SourceConstructorSelection::Ambiguous { .. } => {
                         self.diags.error(
                             entry.span,
                             format!(

@@ -28,6 +28,35 @@ pub(super) fn unpublished_constructor_shapes(
     )
 }
 
+/// One applicable source constructor, with the rank overload selection compares.
+pub(super) struct ScoredSourceConstructor {
+    pub(super) low_priority: bool,
+    pub(super) rank: (usize, std::cmp::Reverse<usize>, bool),
+    pub(super) index: usize,
+    pub(super) resolved: ResolvedCtorDelegation,
+}
+
+/// An unresolved parameter is applicable beside a concrete one, and kotlinc does not let the
+/// concrete exact-match score discard it. Lift those candidates to the best score so specificity
+/// can still tie them. This is a `this`/`super` delegation fact: an ordinary call does not see the
+/// unpublished constructor, so lifting scores there cannot reproduce kotlinc's ambiguity.
+pub(super) fn equate_unresolved_constructor_scores(scored: &mut [ScoredSourceConstructor]) {
+    let Some(best) = scored.iter().map(|candidate| candidate.rank.0).max() else {
+        return;
+    };
+    for candidate in scored {
+        if candidate
+            .resolved
+            .argument_types
+            .iter()
+            .copied()
+            .any(Ty::mentions_error)
+        {
+            candidate.rank.0 = best;
+        }
+    }
+}
+
 /// The primary constructor has no published signature, so its parameters stay error types.
 /// A secondary constructor that did publish its signature keeps those parameter types. Its body
 /// is checked against them, and an error kotlinc reports there is not replaced by `Ty::Error`.
@@ -60,6 +89,39 @@ pub(super) fn unpublished_primary_shapes(
         vec![Ty::Error; class.props.len()],
         secondary,
     )
+}
+
+/// Parameter types of every secondary constructor. A declaration whose signature was not
+/// published — an unpublishable parameter type leaves none — keeps an error type in each source
+/// slot, so the class still has constructor shapes and `this(...)` can name that constructor.
+pub(super) fn published_secondary_parameter_shapes(
+    index: &crate::fir::ResolvedModuleIndex,
+    owner: crate::fir::DeclarationId,
+    class: &ClassDecl,
+) -> Option<Vec<Vec<Ty>>> {
+    class
+        .secondary_ctors
+        .iter()
+        .enumerate()
+        .map(|(ordinal, constructor)| {
+            let sibling = u32::try_from(ordinal + 1).expect("too many secondary constructors");
+            let declaration = index.owned_declaration(
+                owner,
+                crate::fir::DeclarationKind::Constructor,
+                sibling,
+            )?;
+            Some(match index.signature(declaration) {
+                Some(signature) => signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect(),
+                None => {
+                    vec![Ty::Error; class.context_params.len() + constructor.params.len()]
+                }
+            })
+        })
+        .collect()
 }
 
 impl Checker<'_> {
@@ -960,5 +1022,154 @@ impl Checker<'_> {
             });
         }
         candidates
+    }
+
+    /// kotlinc's constructor-overload ambiguity, at the delegation keyword. Only the tied
+    /// most-specific candidates are named. An unpublished parameter keeps the written type's
+    /// unresolved spelling instead of `<error>`.
+    pub(super) fn report_ambiguous_constructor_delegation(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        class_id: DeclId,
+        span: Span,
+        candidates: &[CtorDelegationCandidate],
+        tied: &[usize],
+    ) {
+        let mut message = "overload resolution ambiguity between candidates:".to_string();
+        for index in tied {
+            let Some(candidate) = candidates.get(*index) else {
+                continue;
+            };
+            let Some(line) = self.constructor_candidate_signature(scope, class_id, candidate)
+            else {
+                continue;
+            };
+            message.push('\n');
+            message.push_str(&line);
+        }
+        self.diags.error(span, message);
+    }
+
+    /// `constructor(vararg name: Type = ...): Owner`, shared by ambiguity and inapplicable lists.
+    /// A parameter with no declared name is omitted; diagnostics do not invent `pN`.
+    pub(super) fn constructor_candidate_signature(
+        &self,
+        scope: &CheckerScope<'_>,
+        class_id: DeclId,
+        candidate: &CtorDelegationCandidate,
+    ) -> Option<String> {
+        let Decl::Class(class) = self.file.decl(class_id) else {
+            return None;
+        };
+        let owner = match &candidate.target {
+            ResolvedCtorDelegationTarget::Super { owner, .. } => {
+                displayed_constructor_owner(*owner)
+            }
+            ResolvedCtorDelegationTarget::ThisPrimary { .. }
+            | ResolvedCtorDelegationTarget::ThisSecondary { .. } => class.name.clone(),
+        };
+        let context = candidate.context_count;
+        let types = candidate.target.params();
+        let end = candidate.param_names.len().min(types.len());
+        let start = context.min(end);
+        let written = match &candidate.target {
+            ResolvedCtorDelegationTarget::ThisPrimary { .. } => class
+                .props
+                .iter()
+                .map(|parameter| parameter.ty.clone())
+                .collect::<Vec<_>>(),
+            ResolvedCtorDelegationTarget::ThisSecondary { index, .. } => class
+                .secondary_ctors
+                .get(*index)
+                .map(|constructor| {
+                    constructor
+                        .params
+                        .iter()
+                        .map(|parameter| parameter.ty.clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            ResolvedCtorDelegationTarget::Super { .. } => Vec::new(),
+        };
+        let parts = (start..end)
+            .filter_map(|index| {
+                let name = candidate.param_names.get(index)?;
+                let ty = types[index];
+                let rendered = if ty.mentions_error() {
+                    written.get(index - start).map_or_else(
+                        || ty.source_name(),
+                        |written| self.unresolved_type_display(scope, written),
+                    )
+                } else {
+                    ty.source_name()
+                };
+                let vararg = if candidate.vararg == Some(index) {
+                    "vararg "
+                } else {
+                    ""
+                };
+                let default = if candidate.defaults.get(index).copied().unwrap_or(false) {
+                    " = ..."
+                } else {
+                    ""
+                };
+                Some(format!("{vararg}{name}: {rendered}{default}"))
+            })
+            .collect::<Vec<_>>();
+        Some(format!("constructor({}): {owner}", parts.join(", ")))
+    }
+
+    fn unresolved_type_display(
+        &self,
+        scope: &CheckerScope<'_>,
+        written: &crate::ast::TypeRef,
+    ) -> String {
+        super::delegated_properties::diagnostic_type_syntax(written, |name| {
+            let (selection, _, alias, _) = self.select_classifier_binding(scope, name);
+            super::delegated_properties::delegate_classifier_display(
+                name,
+                scope.tparam_contains(name),
+                selection.found(),
+                alias.is_some() || scope.type_alias(name).is_some(),
+            )
+        })
+    }
+}
+
+/// `Outer.Inner`, while a `$` that belongs to the simple name stays a `$`. Nesting comes from the
+/// name tree, not from rewriting every dollar in the segment.
+fn displayed_constructor_owner(owner: TypeName) -> String {
+    let mut parts = Vec::new();
+    let mut current = owner;
+    loop {
+        match current.exact_nested_owner().and_then(|enclosing| {
+            current
+                .nested_segment_within(enclosing)
+                .map(|segment| (enclosing, segment))
+        }) {
+            Some((enclosing, segment)) => {
+                parts.push(segment);
+                current = enclosing;
+            }
+            None => {
+                parts.push(current.segment_ref());
+                break;
+            }
+        }
+    }
+    parts.reverse();
+    parts.join(".")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::displayed_constructor_owner;
+
+    #[test]
+    fn a_dollar_in_a_constructor_owner_simple_name_stays() {
+        let nested = crate::types::type_name("demo/Outer$Inner");
+        assert_eq!(displayed_constructor_owner(nested), "Outer.Inner");
+        let dollar = crate::types::type_name("demo/Outer$$Name");
+        assert_eq!(displayed_constructor_owner(dollar), "Outer.$Name");
     }
 }

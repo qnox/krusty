@@ -2151,17 +2151,18 @@ impl Body<'_> {
     }
 
     /// The constructor a delegation to `class`'s constructor `ordinal` (0 for the primary) reaches,
-    /// and the parameters it takes.
+    /// and the parameters it takes. Lowering records that ordinal, including when the selected
+    /// constructor is a secondary of a class that has no primary.
     fn constructor_of(&self, class: ClassId, ordinal: u32) -> Result<(u32, Vec<Ty>), Unsupported> {
         let declaration = &self.ir.classes[class as usize];
         let form = &self.file_classes()?.forms[class as usize];
         if ordinal == 0 {
-            let constructor = form.constructor.ok_or_else(|| {
-                format!(
+            let Some(constructor) = form.constructor else {
+                return Err(format!(
                     "a delegation to a primary constructor `{}` lacks",
                     declaration.fq_name()
-                )
-            })?;
+                ));
+            };
             return Ok((
                 constructor,
                 declaration.ctor_args.iter().map(|arg| arg.ty).collect(),

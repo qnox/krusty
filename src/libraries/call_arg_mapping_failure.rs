@@ -5,6 +5,9 @@ pub struct CallArgMappingFailure {
     pub errors: Vec<CallArgMappingError>,
     /// First positional argument rejected after named arguments.
     pub recovery_argument: Option<usize>,
+    /// Source arguments that did land on a parameter, as `(argument index, parameter index)`.
+    /// Later diagnostics read this instead of mapping the call again.
+    pub placed: Vec<(usize, usize)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

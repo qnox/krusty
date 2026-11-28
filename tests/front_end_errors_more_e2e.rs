@@ -276,12 +276,10 @@ fn trailing_lambda_vararg_diagnostic_is_shared_across_source_callables() {
 
 #[test]
 fn non_final_vararg_is_not_reported_as_missing() {
-    let diagnostics = diags(
-        "fun select(vararg values: Int, tail: Int): Int = tail\n\
-         fun use(): Int = select(unknown = 1)",
-    );
-
-    assert_eq!(diagnostics, ["no parameter with name 'unknown' found."]);
+    let source = "fun select(vararg values: Int, tail: Int): Int = tail\n\
+         fun use(): Int = select(unknown = 1)";
+    let result = common::compiler_diagnostics(&[("Main.kt", source)], &[common::stdlib_jar()]);
+    common::expect_identical_rejection(&result, "non-final vararg");
 }
 
 #[test]

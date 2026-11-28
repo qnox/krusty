@@ -14,7 +14,7 @@ pub(super) enum ScopeConstructorSelection {
     Selected(Box<crate::libraries::FunctionInfo>),
     /// Several constructors are equally specific. The provider path reports the ambiguity, but
     /// never commits a constructor of its own choosing.
-    Ambiguous,
+    Ambiguous(Vec<crate::libraries::FunctionInfo>),
     /// No constructor applies. The provider path reports why, but never commits; what it leaves
     /// unreported is reported over the candidates, as for a function family.
     Inapplicable,
@@ -24,14 +24,14 @@ impl ScopeConstructorSelection {
     pub(super) fn selected(&self) -> Option<&crate::libraries::FunctionInfo> {
         match self {
             Self::Selected(selected) => Some(selected),
-            Self::Ambiguous | Self::Inapplicable => None,
+            Self::Ambiguous(_) | Self::Inapplicable => None,
         }
     }
 
     fn preselection(&self) -> ConstructorPreselection<'_> {
         match self {
             Self::Selected(selected) => ConstructorPreselection::Selected(selected),
-            Self::Ambiguous => ConstructorPreselection::Ambiguous,
+            Self::Ambiguous(_) => ConstructorPreselection::Ambiguous,
             Self::Inapplicable => ConstructorPreselection::Rejected,
         }
     }
@@ -146,8 +146,8 @@ impl Checker<'_> {
         ) {
             Some(CallableCandidateSelection::Selected(selected)) => declared(&selected.info)
                 .then(|| ScopeConstructorSelection::Selected(Box::new(selected.info))),
-            Some(CallableCandidateSelection::Ambiguous(..)) => {
-                Some(ScopeConstructorSelection::Ambiguous)
+            Some(CallableCandidateSelection::Ambiguous(candidates, _)) => {
+                Some(ScopeConstructorSelection::Ambiguous(candidates))
             }
             Some(CallableCandidateSelection::MissingContext(_)) | None => candidates
                 .iter()
@@ -263,6 +263,13 @@ impl Checker<'_> {
         (internal, classifier): (TypeName, &crate::libraries::LibraryType),
         call: ScopeConstructorCall<'_>,
     ) -> Result<LibraryConstructorSelection, LibraryConstructorFailure> {
+        if let Some(ScopeConstructorSelection::Ambiguous(candidates)) = call.selection {
+            let message =
+                Self::ambiguous_candidates_message(internal.nested_segment_ref(), candidates);
+            self.diags
+                .error(self.call_callee_name_span(call_args.call), message);
+            return Ok(LibraryConstructorSelection::Rejected(Ty::Error));
+        }
         let checkpoint = self.diags.diags.len();
         let recorded = self.record_library_constructor(
             scope,

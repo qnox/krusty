@@ -174,7 +174,7 @@ impl<'u, 's> Linker<'u, 's> {
             ir.classes[class as usize].init_body = Some(initialize);
             None
         } else {
-            let delegate = secondary_delegation(ir, &plan, superclass)?;
+            let delegate = secondary_delegation(&plan, superclass, self.constructors)?;
             let secondaries = &mut ir.classes[class as usize].secondary_ctors;
             secondaries.push(materialized_secondary(
                 &plan.header,
@@ -490,6 +490,11 @@ impl<'u, 's> Linker<'u, 's> {
         if let Some(call) = &plan.superclass {
             class.superclass = call.owner;
             class.super_ctor_params.clone_from(&call.params);
+            // The superclass constructor was materialized before this class. Its place is the one
+            // that materialization recorded, including a secondary of a class with no primary.
+            if let Some(constructor) = self.constructors.get(&call.constructor) {
+                class.super_ctor.ordinal = recorded_constructor_ordinal(constructor);
+            }
         }
         let parameters = &plan.header.contract.parameters;
         for (formal, bounds) in parameters.formals.iter().zip(&parameters.bounds) {
@@ -1383,9 +1388,9 @@ fn value_class_overrides<'s>(
 /// The constructor a secondary constructor of a class without a primary one delegates to: its
 /// superclass's selected constructor, `Any`'s when it names none.
 fn secondary_delegation(
-    ir: &IrFile,
     plan: &super::super::class_initialization::ClassInitialization<'_, '_>,
     superclass: Option<crate::ir::ClassId>,
+    constructors: &crate::fx_hash::HashMap<KlibDependencyCallable, super::MaterializedConstructor>,
 ) -> Result<crate::ir::CtorDelegateTarget, KlibBodyDeclineReason> {
     let Some(call) = &plan.superclass else {
         return Ok(crate::ir::CtorDelegateTarget::Super {
@@ -1395,10 +1400,20 @@ fn secondary_delegation(
             default_masks: Vec::new(),
         });
     };
-    let ordinal = superclass_constructor_ordinal(
-        superclass.map(|class| &ir.classes[class as usize]),
-        &call.params,
-    )?;
+    // A materialized superclass names the constructor this unit already placed. A superclass the
+    // target lays out itself keeps the primary ordinal and its external constructor identity.
+    let ordinal = if superclass.is_some() {
+        constructors
+            .get(&call.constructor)
+            .map(recorded_constructor_ordinal)
+            .ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "a superclass constructor was not materialized with the delegation".to_owned(),
+                )
+            })?
+    } else {
+        0
+    };
     Ok(crate::ir::CtorDelegateTarget::Super {
         owner: call.owner,
         target_params: call.params.clone(),
@@ -1455,26 +1470,12 @@ fn materialized_secondary(
     }
 }
 
-/// The ordinal of the constructor a delegation with `params` reaches in a materialized superclass.
-/// A superclass without a primary constructor is reached through the secondary one declaring the
-/// selected parameters; Kotlin declares no two constructors of a class with the same ones.
-pub(crate) fn superclass_constructor_ordinal(
-    superclass: Option<&IrClass>,
-    params: &[Ty],
-) -> Result<u32, KlibBodyDeclineReason> {
-    match superclass {
-        Some(parent) if !parent.has_primary_ctor => parent
-            .secondary_ctors
-            .iter()
-            .position(|secondary| secondary.params == params)
-            .map(|index| u32::try_from(index + 1).expect("a constructor ordinal fits u32"))
-            .ok_or_else(|| {
-                KlibBodyDeclineReason::SignatureMismatch(
-                    "a superclass has no constructor with the delegation's parameters".to_owned(),
-                )
-            }),
-        _ => Ok(0),
-    }
+/// The place `constructor` took when its class was materialized: 0 for the primary, `n` for the
+/// `n`th secondary. A class with no primary constructor still numbers its secondaries from 1.
+fn recorded_constructor_ordinal(constructor: &super::MaterializedConstructor) -> u32 {
+    constructor.secondary.map_or(0, |index| {
+        u32::try_from(index + 1).expect("a constructor ordinal fits u32")
+    })
 }
 
 fn set_materialized_modality(

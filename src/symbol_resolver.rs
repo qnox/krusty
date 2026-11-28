@@ -44,6 +44,7 @@ mod member_hierarchy;
 mod member_property_selection;
 mod member_specialization;
 mod overload_selection;
+pub(super) use overload_selection::parameter_at_least_as_specific;
 mod postponed_lambda_selection;
 mod property_candidates;
 mod qualified_classifiers;
@@ -84,7 +85,8 @@ pub(crate) use callable_shapes::{
 };
 pub(crate) use declaration_specificity::{
     declaration_dominance_maxima, declarations_equally_specific, declarations_incomparable,
-    declared_call_shape, retain_most_specific_declarations,
+    declared_call_shape, fixed_arity_then_fewer_omitted_defaults,
+    retain_most_specific_declarations,
 };
 use extension_specialization::{
     bind_defaulted_ext_ret, bind_defaulted_ext_ret_slots, bind_ext_ret, bind_ext_ret_tracking,
@@ -550,17 +552,6 @@ fn vararg_parameter_shape_at(
         expanded.push(vararg_expected(argument));
     }
     Some(expanded)
-}
-
-pub(super) fn parameter_at_least_as_specific(
-    src: &dyn SymbolSource,
-    left: Ty,
-    right: Ty,
-    arg: CallArgKind,
-) -> bool {
-    left == right
-        || (left == arg.ty() && arg.adapts_integer_literal_to(right))
-        || semantic_arg_assignable(src, &right, &left)
 }
 
 /// Select the unique most-specific parameter shape from an already-applicable tied family. This is

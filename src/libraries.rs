@@ -6,6 +6,7 @@ mod array_factories;
 pub(crate) mod builtin_declaration;
 pub mod builtin_member_realization;
 pub(crate) mod builtin_top_level_realization;
+mod call_arg_mapping;
 mod call_arg_mapping_failure;
 mod call_realization;
 mod call_sig;
@@ -56,6 +57,7 @@ pub use annotation_application::{
     AnnotationPositionalPolicy,
 };
 pub use annotation_argument_provenance::AnnotationArgumentProvenance;
+pub use call_arg_mapping::{map_call_args, ParameterSlots};
 pub use call_arg_mapping_failure::{CallArgMappingError, CallArgMappingFailure};
 pub(crate) use call_realization::KlibBodyCallableShape;
 pub use call_realization::KlibBodyCompanionReceiver;
@@ -1180,175 +1182,6 @@ pub struct ParamList {
     /// constructor parameter list. The checker consumes the policy without asking whether the
     /// declaration came from source, Kotlin metadata, or a Java classfile.
     pub annotation: Option<AnnotationParameterPolicy>,
-}
-
-// Call and parameter metadata are independent inputs to slot assignment.
-#[allow(clippy::too_many_arguments)]
-pub fn map_call_args<T: Copy>(
-    args: &[T],
-    names: Option<&[Option<String>]>,
-    param_names: &[String],
-    parameter_count: usize,
-    required: usize,
-    param_defaults: &[bool],
-    vararg: Option<usize>,
-    trailing_lambda: bool,
-) -> Result<Vec<Option<T>>, CallArgMappingFailure> {
-    let mut slots = vec![None; parameter_count];
-    let mut positional = 0usize;
-    let mut seen_named = false;
-    let mut vararg_named = false;
-    // Once a positional argument starts an unbound vararg, following positional arguments remain
-    // elements of that same parameter. A later parameter can only be supplied by name; advancing
-    // by source argument index would incorrectly occupy it and make the later named argument look
-    // duplicated (`f(first = 1, "a", "b", tail = 2)`).
-    let mut positional_vararg_active = false;
-    let mut named_order_matches = true;
-    let mut errors = Vec::new();
-    let mut recovery_argument = None;
-
-    for (argument_index, &argument) in args.iter().enumerate() {
-        match names
-            .and_then(|names| names.get(argument_index))
-            .and_then(Option::as_ref)
-        {
-            Some(name) => {
-                seen_named = true;
-                let Some(parameter_index) = param_names
-                    .iter()
-                    .take(parameter_count)
-                    .position(|parameter| parameter == name)
-                else {
-                    errors.push(CallArgMappingError::NoParameterNamed {
-                        name: name.clone(),
-                        argument: argument_index,
-                    });
-                    continue;
-                };
-                named_order_matches &= parameter_index == argument_index;
-                if slots[parameter_index].is_some() {
-                    errors.push(CallArgMappingError::AlreadyPassed {
-                        argument: argument_index,
-                    });
-                    continue;
-                }
-                if vararg == Some(parameter_index) {
-                    vararg_named = true;
-                }
-                slots[parameter_index] = Some(argument);
-            }
-            None => {
-                let is_trailing_lambda = trailing_lambda && argument_index + 1 == args.len();
-                if is_trailing_lambda {
-                    let last = parameter_count.checked_sub(1);
-                    if vararg == last {
-                        errors.push(CallArgMappingError::TrailingLambdaOnVararg {
-                            argument: argument_index,
-                        });
-                    } else if let Some(parameter_index) =
-                        last.filter(|&index| slots[index].is_none())
-                    {
-                        slots[parameter_index] = Some(argument);
-                    } else {
-                        errors.push(CallArgMappingError::TooManyArguments {
-                            argument: argument_index,
-                            expected: parameter_count,
-                        });
-                    }
-                    continue;
-                }
-
-                if seen_named {
-                    if positional_vararg_active {
-                        continue;
-                    }
-                    if named_order_matches && argument_index >= parameter_count {
-                        // Overflow past the parameter list is legal when a vararg absorbs it
-                        // (`f(a = 1, "x", "y")` — the extras are its elements, reconstructed by
-                        // the slot-map contract), unless the vararg was already bound BY NAME.
-                        if vararg.is_some() && !vararg_named {
-                            continue;
-                        }
-                        errors.push(CallArgMappingError::TooManyArguments {
-                            argument: argument_index,
-                            expected: parameter_count,
-                        });
-                        continue;
-                    }
-                    let slot = if named_order_matches
-                        && argument_index < parameter_count
-                        && slots[argument_index].is_none()
-                    {
-                        Some(argument_index)
-                    } else {
-                        None
-                    };
-                    if let Some(parameter_index) = slot {
-                        slots[parameter_index] = Some(argument);
-                        positional_vararg_active = vararg == Some(parameter_index) && !vararg_named;
-                        named_order_matches &= parameter_index == argument_index;
-                    } else {
-                        recovery_argument.get_or_insert(argument_index);
-                        errors.push(CallArgMappingError::PositionalAfterNamed {
-                            argument: argument_index,
-                        });
-                    }
-                } else {
-                    if vararg == Some(positional) {
-                        if slots[positional].is_none() {
-                            slots[positional] = Some(argument);
-                        }
-                        continue;
-                    }
-                    if positional >= parameter_count {
-                        errors.push(CallArgMappingError::TooManyArguments {
-                            argument: argument_index,
-                            expected: parameter_count,
-                        });
-                        continue;
-                    }
-                    slots[positional] = Some(argument);
-                    positional += 1;
-                }
-            }
-        }
-    }
-
-    if errors.is_empty()
-        || (recovery_argument.is_some()
-            && errors
-                .iter()
-                .all(|error| matches!(error, CallArgMappingError::PositionalAfterNamed { .. })))
-    {
-        for (parameter_index, slot) in slots.iter().enumerate() {
-            let has_default = vararg == Some(parameter_index)
-                || if param_defaults.is_empty() {
-                    parameter_index >= required
-                } else {
-                    param_defaults
-                        .get(parameter_index)
-                        .copied()
-                        .unwrap_or(false)
-                };
-            if slot.is_none() && !has_default {
-                errors.push(CallArgMappingError::MissingRequired {
-                    name: param_names
-                        .get(parameter_index)
-                        .cloned()
-                        .unwrap_or_else(|| format!("p{parameter_index}")),
-                });
-            }
-        }
-    }
-
-    if errors.is_empty() {
-        Ok(slots)
-    } else {
-        Err(CallArgMappingFailure {
-            errors,
-            recovery_argument,
-        })
-    }
 }
 
 /// One overload in a [`FunctionSet`]: the full platform-neutral shape of a single function the front end
@@ -2898,7 +2731,18 @@ mod tests {
         let arguments = [7u8];
 
         assert_eq!(
-            map_call_args(&arguments, None, &[], 1, 1, &[], None, false),
+            map_call_args(
+                &arguments,
+                None,
+                crate::libraries::ParameterSlots {
+                    names: &[],
+                    count: 1,
+                    required: 1,
+                    defaults: &[],
+                    vararg: None
+                },
+                false
+            ),
             Ok(vec![Some(arguments[0])])
         );
     }
@@ -2918,12 +2762,14 @@ mod tests {
             map_call_args(
                 &arguments,
                 Some(&names),
-                &parameters,
-                parameters.len(),
-                3,
-                &[],
-                Some(1),
-                false,
+                crate::libraries::ParameterSlots {
+                    names: &parameters,
+                    count: parameters.len(),
+                    required: 3,
+                    defaults: &[],
+                    vararg: Some(1)
+                },
+                false
             ),
             Ok(vec![Some(10), Some(20), Some(40)])
         );

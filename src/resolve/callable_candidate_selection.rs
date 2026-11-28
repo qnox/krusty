@@ -1191,11 +1191,7 @@ impl Checker<'_> {
             let Ok(mapped_slots) = map_call_args(
                 args,
                 argument_names,
-                &shape.call_sig.param_names,
-                shape.params.len(),
-                shape.call_sig.required,
-                &shape.call_sig.param_defaults,
-                shape.call_sig.vararg_index,
+                crate::libraries::ParameterSlots::of(&shape.call_sig, shape.params.len()),
                 trailing_lambda,
             ) else {
                 continue;
@@ -1529,7 +1525,8 @@ impl Checker<'_> {
                 })
         };
         if maximal.len() > 1 {
-            // Fewer omitted defaults wins only between equally specific declarations.
+            // The shared shape tie-break: fixed arity, then fewer omitted defaults, and only
+            // between equally specific declarations.
             let source = self.fed_source();
             let dominated = maximal
                 .iter()
@@ -1538,12 +1535,16 @@ impl Checker<'_> {
                     maximal
                         .iter()
                         .any(|(_, _, _, _, other_omitted, other, _, other_declared)| {
-                            other_omitted < omitted
-                                && crate::symbol_resolver::declarations_equally_specific(
-                                    &source,
-                                    (declared_receiver(candidate), declared),
-                                    (declared_receiver(other), other_declared),
-                                )
+                            crate::symbol_resolver::fixed_arity_then_fewer_omitted_defaults(
+                                !other.call_sig.vararg,
+                                *other_omitted,
+                                !candidate.call_sig.vararg,
+                                *omitted,
+                            ) && crate::symbol_resolver::declarations_equally_specific(
+                                &source,
+                                (declared_receiver(candidate), declared),
+                                (declared_receiver(other), other_declared),
+                            )
                         })
                         .then_some(index)
                 })

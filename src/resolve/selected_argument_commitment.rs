@@ -280,11 +280,7 @@ impl Checker<'_> {
         let slots = match map_call_args(
             args,
             arg_names,
-            &call_sig.param_names,
-            params.len(),
-            call_sig.required,
-            &call_sig.param_defaults,
-            call_sig.vararg_index,
+            crate::libraries::ParameterSlots::of(call_sig, params.len()),
             trailing_lambda,
         ) {
             Ok(slots) => slots,

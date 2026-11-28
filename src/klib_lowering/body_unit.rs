@@ -37,7 +37,6 @@ use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol};
 use crate::types::{Ty, TypeName};
 
 mod class_construction;
-pub(crate) use class_construction::superclass_constructor_ordinal;
 mod constructor_linking;
 mod enum_materialization;
 mod fake_overrides;

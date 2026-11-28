@@ -472,11 +472,7 @@ impl ProductionSignatureSemantics<'_> {
                 let omitted_defaults = crate::libraries::map_call_args(
                     &source_arguments,
                     argument_names,
-                    &candidate.call_sig.param_names,
-                    declared.len(),
-                    candidate.call_sig.required,
-                    &candidate.call_sig.param_defaults,
-                    candidate.call_sig.vararg_index,
+                    crate::libraries::ParameterSlots::of(&candidate.call_sig, declared.len()),
                     trailing_lambda,
                 )
                 .ok()?
