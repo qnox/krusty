@@ -65,7 +65,7 @@ fn inapplicable_function_value_diagnostics_match_kotlinc_completely() {
         );
         assert_ne!(result.reference_code, 0, "reference accepted {source:?}");
         assert_ne!(result.krusty_code, 0, "krusty accepted {source:?}");
-        let mut observed = complete_errors(&result.krusty_stderr, false);
+        let mut observed = complete_errors(&result.krusty_stderr, true);
         observed.extend(complete_errors(&result.krusty_stdout, false));
         let expected = complete_errors(&result.reference_stderr, true);
         assert!(
@@ -114,7 +114,7 @@ fn a_dependency_function_type_and_default_keep_the_complete_candidate_header() {
     );
     assert_ne!(result.reference_code, 0, "reference accepted {source:?}");
     assert_ne!(result.krusty_code, 0, "krusty accepted {source:?}");
-    let mut observed = complete_errors(&result.krusty_stderr, false);
+    let mut observed = complete_errors(&result.krusty_stderr, true);
     observed.extend(complete_errors(&result.krusty_stdout, false));
     let expected = complete_errors(&result.reference_stderr, true);
     assert!(!expected.is_empty(), "reference emitted no errors");
@@ -170,7 +170,7 @@ fn rejected_provider_constructors_keep_declaration_genericity_and_complete_mappi
         let result = common::compiler_diagnostics(&[(file.as_str(), *source)], &classpath);
         assert_ne!(result.reference_code, 0, "reference accepted {source:?}");
         assert_ne!(result.krusty_code, 0, "product accepted {source:?}");
-        let mut observed = complete_errors(&result.krusty_stderr, false);
+        let mut observed = complete_errors(&result.krusty_stderr, true);
         observed.extend(complete_errors(&result.krusty_stdout, false));
         let expected = complete_errors(&result.reference_stderr, true);
         assert!(!expected.is_empty(), "reference emitted no errors");
@@ -192,7 +192,7 @@ fn a_rejected_call_reports_the_mapped_candidate_of_a_farther_scope_tower_level()
     );
     assert_ne!(result.reference_code, 0, "reference accepted the program");
     assert_ne!(result.krusty_code, 0, "krusty accepted the program");
-    let mut observed = complete_errors(&result.krusty_stderr, false);
+    let mut observed = complete_errors(&result.krusty_stderr, true);
     observed.extend(complete_errors(&result.krusty_stdout, false));
     let expected = complete_errors(&result.reference_stderr, true);
     assert_eq!(expected.len(), 1, "reference errors: {expected:?}");

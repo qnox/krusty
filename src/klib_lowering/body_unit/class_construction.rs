@@ -1003,9 +1003,7 @@ impl<'u, 's> Linker<'u, 's> {
             );
             // An interface default is declared with the class only when a call reaches it; one
             // nothing calls has no frozen declaration, and nothing dispatches to it.
-            let reached_default = !from_class
-                && contract.kind == crate::libraries::TypeKind::Object
-                && self.sources.callees.is_object_default(body);
+            let reached_default = !from_class && self.sources.callees.is_object_default(body);
             if (from_class || reached_default) && self.declared_member(body).is_none() {
                 if let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(body) {
                     let selected = callables[0];
@@ -1047,9 +1045,11 @@ impl<'u, 's> Linker<'u, 's> {
         implemented: &[KlibDependencyCallable],
     ) -> Result<(), KlibBodyDeclineReason> {
         if self.declared_member(body).is_none() {
-            // An interface default no walked body reaches through a declaration it implements is
-            // one nothing dispatches to: the closure released no body for it.
+            // An interface default nothing dispatches to is left out: neither a source call
+            // through a declaration it implements selected it, nor a walked body released it. A
+            // header the closure only holds as declaration evidence selects nothing.
             if self.sources.bodies.is_interface_default(body)
+                && !self.sources.callees.is_selected(body)
                 && !self.sources.callees.is_object_default(body)
             {
                 return Ok(());

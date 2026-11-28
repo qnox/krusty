@@ -135,6 +135,21 @@ pub(crate) trait ClassifierRenaming {
 }
 
 impl ClassDeclarationRecord {
+    /// The primary constructor's `Constructor.flags`.
+    pub(crate) fn primary_constructor_flags(&self) -> u64 {
+        self.primary_ctor_flags
+    }
+
+    /// The `Constructor.flags` of the secondary constructor at `ordinal` of the class's
+    /// secondary constructors, when the record publishes it.
+    pub(crate) fn secondary_constructor_flags(&self, ordinal: usize) -> Option<u64> {
+        let index = self
+            .secondary_ordinals
+            .iter()
+            .position(|&at| at == ordinal)?;
+        Some(self.secondary_ctors.get(index)?.flags)
+    }
+
     /// Apply `renaming` to every classifier the record names.
     pub(crate) fn rename_classifiers(&mut self, renaming: &dyn ClassifierRenaming) {
         let annotations = |annotations: &mut MetadataAnnotations| {

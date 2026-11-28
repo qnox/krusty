@@ -581,12 +581,9 @@ impl ProductionSignatureSemantics<'_> {
         span: Span,
         spelling: &str,
     ) -> crate::fir::DiagnosticId {
-        self.record_source_diagnostic_at(
-            declaration,
-            source,
-            span,
-            format!("unresolved reference '{spelling}'."),
-        )
+        let report = crate::diagnostic_wording::unresolved_reference(spelling);
+        let (message, name) = (report.message, Some(report.name));
+        self.record_source_finding_at(declaration, (source.raw(), span), message, name, None)
     }
 
     fn record_top_level_context_call_failure(
@@ -783,20 +780,7 @@ impl ProductionSignatureSemantics<'_> {
         span: Span,
         message: String,
     ) -> crate::fir::DiagnosticId {
-        let file = source.raw();
-        let mut diagnostics = self.diagnostics.borrow_mut();
-        if let Some(index) = diagnostics.iter().position(|diagnostic| {
-            diagnostic.file == file && diagnostic.span == span && diagnostic.message == message
-        }) {
-            return crate::fir::DiagnosticId::from_raw(index as u32 + 1);
-        }
-        diagnostics.push(ProductionSignatureDiagnostic::conditional(
-            declaration,
-            file,
-            span,
-            message,
-        ));
-        crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
+        self.record_source_finding_at(declaration, (source.raw(), span), message, None, None)
     }
 
     /// A finding reported on every exit, once per `identity`.
@@ -2188,7 +2172,7 @@ impl ProductionSignatureSemantics<'_> {
                                 .find(|function| {
                                     function.signature().stable_declaration == Some(scope.owner)
                                 })
-                                .map(|function| function.receiver_ty())
+                                .map(stable_function_index::member_extension_receiver)
                             {
                                 receivers.push(SignatureImplicitReceiver::ordinary(extension));
                             }

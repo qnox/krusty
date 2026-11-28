@@ -58,6 +58,18 @@ pub(super) fn emit_recorded(
     }
 }
 
+/// Write a constructor's declared annotations, with the attributes they imply, onto a constructor
+/// the caller has already added.
+pub(super) fn emit_constructor_declared(
+    cw: &mut ClassWriter,
+    annotations: &krusty::ir::DeclarationAnnotations,
+    descriptor: &str,
+) {
+    if !annotations.retains_none() {
+        emit_declared(cw, annotations, "<init>", descriptor);
+    }
+}
+
 /// Write a method's declared annotations, with the attributes `@Deprecated` implies.
 pub(super) fn emit_declared(
     cw: &mut ClassWriter,

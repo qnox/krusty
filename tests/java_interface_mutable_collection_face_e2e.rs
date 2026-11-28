@@ -150,9 +150,11 @@ fn a_read_only_list_still_refuses_a_mutable_list() {
         message: "return type mismatch: expected 'MutableList<String>', actual 'List<String>'."
             .to_string(),
     };
-    assert_eq!(krusty_lines.len(), 2);
+    assert_eq!(krusty_lines.len(), 4);
     assert_eq!(located_error(krusty_lines[0]), expected);
-    assert_eq!(krusty_lines[1], "krusty: 1 error(s)");
+    assert_eq!(krusty_lines[1], SRC.trim_end());
+    assert_eq!(krusty_lines[2], format!("{}^", " ".repeat(50)));
+    assert_eq!(krusty_lines[3], "krusty: 1 error(s)");
     assert_eq!(reference_lines.len(), 3);
     assert_eq!(located_error(reference_lines[0]), expected);
     assert_eq!(reference_lines[1], SRC.trim_end());

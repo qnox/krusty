@@ -17,6 +17,8 @@ use krusty::klib::write::{KlibPlatform, KlibStamp};
 use crate::common;
 
 const PROGRAM: &str = include_str!("box_regressions/multimodule/libraryTopLevelFunctionBodies.kt");
+const CLASS_PROGRAM: &str = include_str!("box_regressions/multimodule/libraryClassBodies.kt");
+const CLASS_FORMS_PROGRAM: &str = include_str!("box_regressions/multimodule/libraryClassForms.kt");
 
 /// The provisioned reference Kotlin/Native distribution, whose stdlib the library compiles against.
 /// A missing distribution fails the oracle rather than skipping it.
@@ -40,8 +42,8 @@ fn kotlin_native_root() -> PathBuf {
 }
 
 /// The shared program's library and main sources.
-fn program_sources() -> (String, String) {
-    let modules = krusty::conformance::split_modules(PROGRAM).expect("a two-module program");
+fn program_sources(program: &str) -> (String, String) {
+    let modules = krusty::conformance::split_modules(program).expect("a two-module program");
     let [library, main] = modules.as_slice() else {
         panic!("the shared program has a library and a main module");
     };
@@ -134,9 +136,20 @@ fn scratch(name: &str) -> PathBuf {
 
 #[test]
 fn kotlinc_native_runs_a_program_against_krusty_written_function_bodies() {
+    run_against_krusty_library(PROGRAM, "krusty-function-bodies-official-consumer");
+}
+
+#[test]
+fn kotlinc_native_runs_a_program_against_krusty_written_class_bodies() {
+    run_against_krusty_library(CLASS_PROGRAM, "krusty-class-bodies-official-consumer");
+}
+
+/// Link the main module of `program` against krusty's KLIB of its library with kotlinc-native,
+/// and run it.
+fn run_against_krusty_library(program: &str, name: &str) {
     let native_root = kotlin_native_root();
-    let (library_source, main_source) = program_sources();
-    let work = scratch("krusty-function-bodies-official-consumer");
+    let (library_source, main_source) = program_sources(program);
+    let work = scratch(name);
     let library = write_library(&work, &library_source);
     let main = work.join("Main.kt");
     std::fs::write(
@@ -266,11 +279,58 @@ const KOTLINC_SHAPED: [&str; 6] = ["answer", "sum", "greet", "isNegative", "diff
 #[test]
 fn kotlinc_reads_krusty_written_function_bodies_as_it_writes_them() {
     let native_root = kotlin_native_root();
-    let (library_source, _) = program_sources();
+    let (library_source, _) = program_sources(PROGRAM);
     let work = scratch("krusty-function-bodies-dump");
     let krusty_library = write_library(&work, &library_source);
+    let kotlinc_library = kotlinc_library(&native_root, &work, &library_source);
+    let krusty = dump_ir(&native_root, &krusty_library);
+    let kotlinc = dump_ir(&native_root, &kotlinc_library);
+    assert_eq!(
+        functions(&krusty, &KOTLINC_SHAPED),
+        functions(&kotlinc, &KOTLINC_SHAPED),
+        "the whole krusty dump:\n{krusty}"
+    );
+    std::fs::remove_dir_all(work).expect("remove the dump directory");
+}
+
+/// The library's whole dump, with the one fact common IR does not record: whether a `this` a
+/// member body reads was written or implied, which kotlinc's `IMPLICIT_ARGUMENT` origin says.
+#[test]
+fn kotlinc_native_runs_a_program_against_krusty_written_class_forms() {
+    run_against_krusty_library(CLASS_FORMS_PROGRAM, "krusty-class-forms-official-consumer");
+}
+
+#[test]
+fn kotlinc_reads_krusty_written_class_bodies_as_it_writes_them() {
+    assert_kotlinc_dump(CLASS_PROGRAM, "krusty-class-bodies-dump");
+}
+
+#[test]
+fn kotlinc_reads_krusty_written_class_forms_as_it_writes_them() {
+    assert_kotlinc_dump(CLASS_FORMS_PROGRAM, "krusty-class-forms-dump");
+}
+
+/// `klib dump-ir` prints the same tree for the library module of `program` whether krusty or
+/// kotlinc-native wrote it. Common IR does not record which receivers the source left implicit,
+/// so kotlinc's `IMPLICIT_ARGUMENT` origin reads as no origin.
+fn assert_kotlinc_dump(program: &str, name: &str) {
+    let native_root = kotlin_native_root();
+    let (library_source, _) = program_sources(program);
+    let work = scratch(name);
+    let krusty_library = write_library(&work, &library_source);
+    let kotlinc_library = kotlinc_library(&native_root, &work, &library_source);
+    let krusty = dump_ir(&native_root, &krusty_library);
+    let kotlinc =
+        dump_ir(&native_root, &kotlinc_library).replace("origin=IMPLICIT_ARGUMENT", "origin=null");
+    assert_eq!(krusty, kotlinc);
+    std::fs::remove_dir_all(work).expect("remove the dump directory");
+}
+
+/// kotlinc-native's own unpacked KLIB of `source`, under `work`.
+fn kotlinc_library(native_root: &Path, work: &Path, source: &str) -> PathBuf {
     let kotlinc_source = work.join("Library.kt");
-    std::fs::write(&kotlinc_source, &library_source).expect("write the library source");
+    std::fs::write(&kotlinc_source, source).expect("write the library source");
+    let library = work.join("kotlinc-lib");
     let output = Command::new(native_root.join("bin/kotlinc-native"))
         .arg(&kotlinc_source)
         .args([
@@ -281,7 +341,7 @@ fn kotlinc_reads_krusty_written_function_bodies_as_it_writes_them() {
             "lib",
             "-output",
         ])
-        .arg(work.join("kotlinc-lib"))
+        .arg(&library)
         .output()
         .expect("launch the pinned kotlinc-native");
     assert!(
@@ -290,12 +350,5 @@ fn kotlinc_reads_krusty_written_function_bodies_as_it_writes_them() {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-    let krusty = dump_ir(&native_root, &krusty_library);
-    let kotlinc = dump_ir(&native_root, &work.join("kotlinc-lib"));
-    assert_eq!(
-        functions(&krusty, &KOTLINC_SHAPED),
-        functions(&kotlinc, &KOTLINC_SHAPED),
-        "the whole krusty dump:\n{krusty}"
-    );
-    std::fs::remove_dir_all(work).expect("remove the dump directory");
+    library
 }

@@ -2101,6 +2101,42 @@ impl<'a> Body<'a> {
             {
                 self.property_write(Some(id), *target, *dispatch_receiver, *value)?
             }
+            // An extension or context property this file does not lay out: another file of the
+            // module declares it and exports its accessors' entries. A local one was realized as
+            // a call of its accessor before emission.
+            IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::PropertyRead {
+                    target,
+                    dispatch_receiver,
+                    extension_receiver,
+                    context_arguments,
+                    ..
+                } = &**checked_op =>
+            {
+                let declared = context_arguments
+                    .iter()
+                    .copied()
+                    .chain(*extension_receiver)
+                    .collect::<Vec<_>>();
+                self.module_receiver_property(*target, *dispatch_receiver, &declared, None)?
+            }
+            IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::PropertyWrite {
+                    target,
+                    dispatch_receiver,
+                    extension_receiver,
+                    context_arguments,
+                    value,
+                    ..
+                } = &**checked_op =>
+            {
+                let declared = context_arguments
+                    .iter()
+                    .copied()
+                    .chain(*extension_receiver)
+                    .collect::<Vec<_>>();
+                self.module_receiver_property(*target, *dispatch_receiver, &declared, Some(*value))?
+            }
             IrExpr::Call {
                 callee: ref call_callee,
                 dispatch_receiver: Some(receiver),

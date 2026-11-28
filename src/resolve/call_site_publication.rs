@@ -78,6 +78,7 @@ pub(super) fn declared_selection(
     bindings: crate::symbol_resolver::GSigBinds,
     intersection_bindings: HashMap<String, Vec<Ty>>,
     candidate_index: usize,
+    ambiguous_literals: Vec<(usize, Vec<Ty>)>,
 ) -> SelectedCallable {
     let declared = |ty: Ty| variables.declared_type(ty);
     let call_site_params = candidate.callable.params.clone();
@@ -103,6 +104,7 @@ pub(super) fn declared_selection(
             })
             .collect(),
         candidate_index: Some(candidate_index),
+        ambiguous_literals,
     }
 }
 

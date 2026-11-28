@@ -3,20 +3,24 @@ use super::{
     ResolvedCtorDelegationTarget, ResolvedEnumEntry,
 };
 use crate::ast::ExprId;
-use crate::diag::Span;
 use crate::symbol_resolver::ScopedValue;
 use crate::types::{Ty, TypeName};
 
 impl Checker<'_> {
-    /// Record the checked enum constructor with its declaration-owned classifier identity.
+    /// Finish the checked arguments of an enum `entry` and record the constructor it selects with
+    /// its declaration-owned classifier identity.
     /// A deferred header does not erase the identity already bound for that same declaration.
     pub(super) fn record_enum_entry_constructor(
         &mut self,
-        entry_span: Span,
+        scope: &CheckerScope<'_>,
+        entry: &crate::ast::AstEnumEntry,
         streamed_enum_owner: Option<crate::fir::DeclarationId>,
         enum_signature: Option<&ClassSig>,
         selected: ResolvedCtorDelegation,
     ) {
+        for &argument in &entry.args {
+            self.finish_executable_root(argument);
+        }
         let (primary, stable_declaration) = match &selected.target {
             ResolvedCtorDelegationTarget::ThisPrimary { .. } => (
                 true,
@@ -61,6 +65,12 @@ impl Checker<'_> {
                 unreachable!("an enum entry selects a constructor of its enum class")
             }
         };
+        // The entry's own annotations (`@OptIn(M::class) ENTRY`) accept what its call needs.
+        let entry_policy_depth =
+            self.push_declaration_policies(scope, &entry.annotations, &entry.annotation_args);
+        self.check_enum_entry_opt_in(entry.span, entry.explicit_call, stable_declaration);
+        self.active_lexical_policies.truncate(entry_policy_depth);
+        let entry_span = entry.span;
         self.resolved_enum_entry_constructors.insert(
             (entry_span.lo, entry_span.hi),
             ResolvedConstructor::Source {

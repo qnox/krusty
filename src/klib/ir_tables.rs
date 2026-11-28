@@ -11,10 +11,13 @@ use crate::types::{Ty, TyKind, TypeName};
 
 pub(super) const FUNCTION_SYMBOL: u64 = 0;
 pub(super) const CONSTRUCTOR_SYMBOL: u64 = 1;
+pub(super) const FIELD_SYMBOL: u64 = 3;
 pub(super) const VALUE_PARAMETER_SYMBOL: u64 = 4;
 pub(super) const CLASS_SYMBOL: u64 = 6;
 pub(super) const TYPE_PARAMETER_SYMBOL: u64 = 7;
+pub(super) const ANONYMOUS_INITIALIZER_SYMBOL: u64 = 9;
 pub(super) const RECEIVER_PARAMETER_SYMBOL: u64 = 11;
+pub(super) const PROPERTY_SYMBOL: u64 = 12;
 
 /// The tables of one IR file under construction.
 #[derive(Default)]
@@ -148,6 +151,19 @@ impl IrTables {
         let mut encoded = Pb::new();
         encoded.field_message(5, &composite);
         self.signature(encoded.canonical().into_bytes())
+    }
+
+    /// The backing field of the property `property` signs: the property's identity scoped to the
+    /// local `<BF>`.
+    pub(super) fn field_signature(&mut self, property: &KlibPublicIdSignature) -> u32 {
+        let property = self.public_signature(property);
+        let name = self.string("<BF>");
+        let mut local = Pb::new();
+        local.field_packed_varints(1, &[u64::from(name)]);
+        let mut encoded = Pb::new();
+        encoded.field_message(6, &local);
+        let local = self.signature(encoded.canonical().into_bytes());
+        self.composite_signature(property, local)
     }
 
     pub(super) fn type_parameter_signature(&mut self, function: u32, index: usize) -> u32 {

@@ -296,7 +296,7 @@ impl Checker<'_> {
     }
 
     /// Whether statement `s` guarantees the function returns/throws (for the missing-return check).
-    fn stmt_terminates(&self, s: StmtId) -> bool {
+    pub(super) fn stmt_terminates(&self, s: StmtId) -> bool {
         match self.file.stmt(s) {
             Stmt::Return(..) => true,
             Stmt::Expr(e) => self.body_terminates(*e),

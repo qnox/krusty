@@ -4,6 +4,7 @@ mod applied_formal_bounds;
 mod bound_inner_aliases;
 mod bound_inner_constructors;
 mod java_accessor_overrides;
+mod parameter_enhancement;
 mod receiver_parameter_overrides;
 mod result_enhancement;
 
@@ -904,6 +905,7 @@ fn normalize_inherited_member_functions_with_family(
     inherit_overridden_semantic_roles(source, functions, intersection_parts);
     record_overridden_declarations(source, functions, intersection_parts);
     result_enhancement::enhance_overriding_flexible_results(source, functions);
+    parameter_enhancement::enhance_overriding_flexible_parameters(source, functions);
     inherit_overridden_default_arguments(source, functions);
     inherit_overridden_results(source, functions);
     retain_covariant_inherited_overrides(source, functions, intersection_parts);

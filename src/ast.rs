@@ -951,6 +951,8 @@ pub struct AstEnumEntry {
     pub annotations: Vec<AnnotationRef>,
     /// The argument expressions of each annotation in `annotations` (same order/length).
     pub annotation_args: Vec<Vec<ExprId>>,
+    /// Whether the entry wrote a constructor call (`RED()`), as opposed to `RED`.
+    pub explicit_call: bool,
     /// Constructor arguments (`RED(0xFF0000)` → the two arg expr ids); empty for `RED` with no args.
     pub args: Vec<ExprId>,
     /// Per-argument name for a NAMED argument (`RED(rgb = 0xFF0000)`), parallel to `args`; `None` for

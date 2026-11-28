@@ -617,6 +617,26 @@ fn member_bridges(
     ) {
         return BridgeSelection::default();
     }
+    // The Java superclass's own method under the builtin's Kotlin name is an unrelated member
+    // that the renamed face does not override (`CharBuffer.get(int)` beside `charAt(int)`).
+    // kotlinc still emits the face's entry under that name, which overrides the Java method, or
+    // fails to load when it is final ([`Quirk::JavaRenamedBuiltinEntryOverridesJavaMember`]).
+    //
+    // [`Quirk::JavaRenamedBuiltinEntryOverridesJavaMember`]: krusty::kotlin_version::Quirk::JavaRenamedBuiltinEntryOverridesJavaMember
+    if specialized_name != specification.physical_name
+        && !ir
+            .reference
+            .quirks()
+            .has(krusty::kotlin_version::Quirk::JavaRenamedBuiltinEntryOverridesJavaMember)
+        && inherits_method(
+            classpath,
+            class.superclass,
+            &specialized_name,
+            &specialized_descriptor,
+        )
+    {
+        return BridgeSelection::default();
+    }
 
     let physical_signature = if specification.kind == MappedBuiltinMemberKind::Property {
         Some(InheritedBridgeSignature {
@@ -863,7 +883,25 @@ fn declares(
     })
 }
 
-fn inherits_final(classpath: &Classpath, mut next: TypeName, name: &str, descriptor: &str) -> bool {
+fn inherits_final(classpath: &Classpath, next: TypeName, name: &str, descriptor: &str) -> bool {
+    inherits_matching(classpath, next, name, descriptor, MethodSig::is_final)
+}
+
+/// Whether a superclass from `next` up declares an instance method `name` `descriptor` a subclass
+/// would override.
+fn inherits_method(classpath: &Classpath, next: TypeName, name: &str, descriptor: &str) -> bool {
+    inherits_matching(classpath, next, name, descriptor, |method| {
+        !method.is_private() && !method.is_static()
+    })
+}
+
+fn inherits_matching(
+    classpath: &Classpath,
+    mut next: TypeName,
+    name: &str,
+    descriptor: &str,
+    matches: impl Fn(&MethodSig) -> bool,
+) -> bool {
     for _ in 0..64 {
         if next == krusty::types::wk::java_object() {
             return false;
@@ -871,9 +909,11 @@ fn inherits_final(classpath: &Classpath, mut next: TypeName, name: &str, descrip
         let Some(info) = classpath.find_name(next) else {
             return false;
         };
-        if info.methods.iter().any(|method| {
-            method.is_final() && method.name == name && method.descriptor == descriptor
-        }) {
+        if info
+            .methods
+            .iter()
+            .any(|method| method.name == name && method.descriptor == descriptor && matches(method))
+        {
             return true;
         }
         match info.super_class {

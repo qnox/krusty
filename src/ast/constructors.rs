@@ -41,6 +41,9 @@ pub struct SecondaryCtor {
     /// The visibility the declaration was written with. A secondary constructor is the one member
     /// whose modifiers used to be dropped, which published every `private constructor` publicly.
     pub visibility: Visibility,
+    /// Whether a visibility modifier was written: an unmodified constructor is `Public` in
+    /// [`Self::visibility`], yet `private` in an enum class.
+    pub visibility_written: bool,
 }
 
 /// The source lines a class's PRIMARY constructor declaration owns. The parser stores each token's

@@ -35,6 +35,10 @@ pub(super) fn validate(file: &File, diagnostics: &mut DiagSink) {
                         );
                     }
                 }
+                for diagnostic in crate::declaration_validation::enum_constructor_diagnostics(class)
+                {
+                    diagnostics.error(diagnostic.span, diagnostic.message.to_string());
+                }
                 for function in &class.methods {
                     validate_function(function, true, diagnostics);
                 }

@@ -137,41 +137,6 @@ fn library_backend(
 }
 
 impl NativeLane {
-    /// Compile every module but the last into a KLIB only, link the last module's program against
-    /// those KLIBs, and run it.
-    fn compile_klib_modules_and_run(
-        &self,
-        scratch: &Path,
-        stem: &str,
-        modules: &[krusty::conformance::ModuleUnit],
-        directive_source: &str,
-    ) -> Outcome {
-        let target = self.target.expect("checked by `unavailable`");
-        let backend = CraneliftBackend::new(target)
-            .with_entry(Entry::Box)
-            .verified();
-        let library = match library_backend(target, directive_source) {
-            Ok(library) => library,
-            Err(outcome) => return outcome,
-        };
-        let program = match box_lane::compile_modules_from_klibs(
-            ModuleCase {
-                scratch,
-                stem,
-                modules,
-            },
-            directive_source,
-            TestTarget::Native,
-            &backend,
-            &library,
-            DECLINE_PREFIX,
-        ) {
-            Ok(program) => program,
-            Err(outcome) => return outcome,
-        };
-        self.run_artifacts(scratch, stem, "klib-modules", directive_source, program)
-    }
-
     fn run_artifacts(
         &self,
         scratch: &Path,
@@ -242,6 +207,39 @@ impl NativeLane {
 }
 
 impl Lane for NativeLane {
+    fn compile_klib_modules_and_run(
+        &self,
+        scratch: &Path,
+        stem: &str,
+        modules: &[krusty::conformance::ModuleUnit],
+        directive_source: &str,
+    ) -> Outcome {
+        let target = self.target.expect("checked by `unavailable`");
+        let backend = CraneliftBackend::new(target)
+            .with_entry(Entry::Box)
+            .verified();
+        let library = match library_backend(target, directive_source) {
+            Ok(library) => library,
+            Err(outcome) => return outcome,
+        };
+        let program = match box_lane::compile_modules_from_klibs(
+            ModuleCase {
+                scratch,
+                stem,
+                modules,
+            },
+            directive_source,
+            TestTarget::Native,
+            &backend,
+            &library,
+            DECLINE_PREFIX,
+        ) {
+            Ok(program) => program,
+            Err(outcome) => return outcome,
+        };
+        self.run_artifacts(scratch, stem, "klib-modules", directive_source, program)
+    }
+
     fn platform(&self) -> Platform {
         Platform::Native
     }
@@ -613,6 +611,21 @@ fn native_official_dependency_interfaces_installed_by_two_files_keep_distinct_nu
 // PLATFORM-SPECIFIC: official Kotlin/Native KLIB production and linking, as above. The complete
 // portable Kotlin input is the shared multi-module regression.
 //
+/// A library lambda calls an abstract member of its receiver's class before anything constructs
+/// the class: the call is the class's dispatch slot, which the private subclass implements.
+#[test]
+fn native_official_dependency_abstract_member_called_before_construction_dispatches() {
+    run_native_against_official_producer(
+        include_str!(
+            "box_regressions/multimodule/dependencyAbstractMemberCalledBeforeConstruction.kt"
+        ),
+        "dependencyAbstractMemberCalledBeforeConstruction",
+    );
+}
+
+// PLATFORM-SPECIFIC: official Kotlin/Native KLIB production and linking, as above. The complete
+// portable Kotlin input is the shared multi-module regression.
+//
 /// A library lambda's parameter is a class private to the library's file: the lambda's header
 /// names the class as the body that creates it does.
 #[test]
@@ -620,6 +633,19 @@ fn native_official_dependency_lambda_over_file_private_class_runs() {
     run_native_against_official_producer(
         include_str!("box_regressions/multimodule/dependencyLambdaOverFilePrivateClass.kt"),
         "dependencyLambdaOverFilePrivateClass",
+    );
+}
+
+// PLATFORM-SPECIFIC: official Kotlin/Native KLIB production and linking, as above. The complete
+// portable Kotlin input is the shared multi-module regression.
+//
+/// A library body reads and writes a property a class private to its file inherits: the
+/// accessors link to the inherited property's.
+#[test]
+fn native_official_dependency_file_private_class_inherited_property_runs() {
+    run_native_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyFilePrivateClassInheritedProperty.kt"),
+        "dependencyFilePrivateClassInheritedProperty",
     );
 }
 
@@ -1163,6 +1189,38 @@ fn native_links_a_library_s_top_level_function_bodies_from_its_klib() {
     let stem = "nativeLibraryTopLevelFunctionBodies";
     super::box_reference_classes::checked_box(source, stem)
         .expect("the exact Kotlin compiler must run the whole library-bodies program");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    let lane = NativeLane { target: host() };
+    assert_eq!(lane.unavailable(), None);
+    assert_eq!(
+        lane.compile_klib_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+        Outcome::Pass
+    );
+}
+
+#[test]
+fn native_links_a_library_s_class_bodies_from_its_klib() {
+    let source = include_str!("box_regressions/multimodule/libraryClassBodies.kt");
+    let stem = "nativeLibraryClassBodies";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the exact Kotlin compiler must run the whole library-classes program");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    let lane = NativeLane { target: host() };
+    assert_eq!(lane.unavailable(), None);
+    assert_eq!(
+        lane.compile_klib_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+        Outcome::Pass
+    );
+}
+
+#[test]
+fn native_links_a_library_s_interfaces_abstract_classes_and_objects_from_its_klib() {
+    let source = include_str!("box_regressions/multimodule/libraryClassForms.kt");
+    let stem = "nativeLibraryClassForms";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the exact Kotlin compiler must run the whole library class-forms program");
     let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
     let units = krusty::conformance::module_units(&modules);
     let lane = NativeLane { target: host() };

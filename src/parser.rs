@@ -1962,13 +1962,13 @@ impl<'a> Parser<'a> {
         let name_span = self.declaration_name_span;
         // Optional explicit `constructor` keyword and primary constructor:
         // `enum class C constructor(val rgb: Int, …)`.
-        let mut ctor_open_offset = 0u32;
-        // `NL* primaryConstructor`: the `constructor` keyword may also start on a later line.
-        if self.primary_constructor_header_follows() {
-            self.skip_semicolons();
-        }
+        // The constructor may carry annotations and modifiers, and start on a later line.
+        let primary_constructor_prefix = self.parse_primary_constructor_prefix();
+        let mut ctor_open_offset = primary_constructor_prefix.open_offset;
         if self.at(TokenKind::Ident) && self.keyword_text("constructor") {
-            ctor_open_offset = self.tok().span.lo;
+            if ctor_open_offset == 0 {
+                ctor_open_offset = self.tok().span.lo;
+            }
             self.bump();
         }
         // `NL* primaryConstructor`: the parameter list may start on a later line.
@@ -2065,8 +2065,8 @@ impl<'a> Parser<'a> {
         let end = self.t[self.i.saturating_sub(1)].span;
         let has_primary_ctor = has_primary_ctor || secondary_ctors.is_empty();
         ClassDecl {
-            primary_ctor_visibility: Visibility::Public,
-            primary_ctor_visibility_span: None,
+            primary_ctor_visibility: primary_constructor_prefix.visibility,
+            primary_ctor_visibility_span: primary_constructor_prefix.visibility_span,
             name,
             name_span,
             visibility: Visibility::Public,
@@ -2108,8 +2108,9 @@ impl<'a> Parser<'a> {
             // implicit no-arg primary constructor. An enum that declares only secondary
             // constructors has no primary constructor; normalizing that distinction here keeps
             // every later phase on the same constructor graph.
-            primary_ctor_annotations: has_primary_ctor.then_some(Vec::new()),
-            primary_ctor_annotation_args: Vec::new(),
+            primary_ctor_annotations: has_primary_ctor
+                .then_some(primary_constructor_prefix.annotations),
+            primary_ctor_annotation_args: primary_constructor_prefix.annotation_args,
             span: Span::new(start.lo, end.hi),
             primary_ctor_lines: PrimaryCtorLines {
                 open_line: ctor_open_offset,
@@ -2596,37 +2597,12 @@ impl<'a> Parser<'a> {
         };
         let lexical_type_param_lens =
             self.push_lexical_type_params(&type_params, &type_param_bounds);
-        let mut primary_constructor_annotations = Vec::new();
-        let mut primary_constructor_annotation_args = Vec::new();
-        // An explicit constructor prefix may continue across physical newlines.
-        let mut primary_ctor_visibility = Visibility::Public;
-        // The primary constructor starts at its first modifier, annotation, `constructor` keyword,
-        // or `(`; a KDoc before it is not part of it.
-        let mut ctor_open_offset = 0u32;
-        let mut primary_ctor_visibility_span = None;
-        if self.primary_constructor_header_follows() {
-            self.skip_semicolons();
-            ctor_open_offset = self.tok().span.lo;
-            if self.at(TokenKind::At) || self.at_modifier() {
-                let prefix_start = self.i;
-                let ctor_mods = self.skip_decl_prefix();
-                primary_ctor_visibility_span = self.t[prefix_start..self.i]
-                    .iter()
-                    .find(|token| {
-                        token.kind == TokenKind::Ident
-                            && matches!(
-                                token.text(self.src),
-                                "private" | "protected" | "internal" | "public"
-                            )
-                    })
-                    .map(|token| token.span);
-                // The declared constructor visibility survives into `@Metadata` (and, for
-                // `protected`, the JVM `<init>` access flags).
-                primary_ctor_visibility = visibility_of(&ctor_mods);
-                primary_constructor_annotations = self.take_pending_annotations();
-                primary_constructor_annotation_args = self.take_pending_annotation_args();
-            }
-        }
+        let primary_constructor_prefix = self.parse_primary_constructor_prefix();
+        let primary_ctor_visibility = primary_constructor_prefix.visibility;
+        let primary_ctor_visibility_span = primary_constructor_prefix.visibility_span;
+        let primary_constructor_annotations = primary_constructor_prefix.annotations;
+        let primary_constructor_annotation_args = primary_constructor_prefix.annotation_args;
+        let mut ctor_open_offset = primary_constructor_prefix.open_offset;
         let header_ctor_kw = self.at(TokenKind::Ident) && self.keyword_text("constructor");
         let header_lo = self.tok().span.lo;
         let mut ctor_decl_offset = if header_ctor_kw { header_lo } else { 0 };

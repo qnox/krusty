@@ -665,8 +665,8 @@ fn a_function_with_what_the_plugin_ir_does_not_carry_is_refused_where_it_is_writ
             "the `suspend` modifier of `f`",
         ),
         (
-            "tailrec fun f(n: Int): Int { return n }\n",
-            "fun f(n: Int): Int { return n }",
+            "tailrec fun f(n: Int): Int { if (n > 0) return f(n - 1); return n }\n",
+            "fun f(n: Int): Int { if (n > 0) return f(n - 1); return n }",
             "the `tailrec` modifier of `f`",
         ),
         (

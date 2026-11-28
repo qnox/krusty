@@ -28,7 +28,12 @@ fn editor_diagnostics(source: &str) -> Vec<String> {
         &krusty::features::LangFeatures::from_environment(),
         &mut diags,
     );
-    diags.diags.iter().map(|d| d.msg.clone()).collect()
+    let names = krusty::diag::DiagnosticNames::Hidden;
+    diags
+        .diags
+        .iter()
+        .map(|d| d.message(names).into_owned())
+        .collect()
 }
 
 const INFERRED_PROPERTIES: &str = r#"

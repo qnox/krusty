@@ -1555,14 +1555,14 @@ impl BodyLowering<'_> {
                 .callable_reference_provenance
                 .contains_key(&(raw as u32));
             unnamed
-                && matches!(
+                && (matches!(
                     self.ir.exprs[raw],
                     crate::ir::IrExpr::CallableReference(_)
                 ) || matches!(
                     &self.ir.exprs[raw],
                     crate::ir::IrExpr::Checked(checked_op)
                         if matches!(&**checked_op, crate::ir::IrCheckedOperation::PropertyReference { .. })
-                )
+                ))
         });
         let (Some(reference), None) = (references.next(), references.next()) else {
             return;

@@ -240,6 +240,17 @@ impl KlibAccessorIdSignature {
         &self.property
     }
 
+    /// This accessor's exact identity as a member of `class`, whose property keeps its member id:
+    /// see [`KlibPublicIdSignature::as_member_of`].
+    pub(crate) fn as_member_of(&self, class: &KlibPublicIdSignature) -> Option<Self> {
+        Some(Self {
+            property: self.property.as_member_of(class)?,
+            name: self.name.clone(),
+            member_id: self.member_id,
+            mask: self.mask,
+        })
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }

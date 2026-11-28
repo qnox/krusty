@@ -655,7 +655,16 @@ fn carrier_expression(
         capture_types.drain(..bound_contexts);
         capture_types.push(array_type);
     }
-    constructor_arguments.extend(bound_receiver);
+    // The runtime base class stores the bound receiver as an object, so the constructor takes it as
+    // one: a value read at an erased type (a generic call's result) is handed on without a cast to
+    // its own type, as kotlinc hands it, and a value-class receiver is bound as its box.
+    constructor_arguments.extend(bound_receiver.map(|receiver| {
+        ir.add_expr(IrExpr::TypeOp {
+            op: krusty::ir::IrTypeOp::ImplicitCoercion,
+            arg: receiver,
+            type_operand: Ty::nullable(Ty::obj("kotlin/Any")),
+        })
+    }));
     // The constructor's declared parameters say that a value-class receiver is bound as its box.
     match constructor_arguments.as_slice() {
         arguments if !arguments.is_empty() => {

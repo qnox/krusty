@@ -796,12 +796,22 @@ impl<'a> FileLowering<'a> {
                 match self.unit_kind {
                     krusty::backend::CheckedIrUnitKind::DependencySupport
                         if self.exported.iter().any(|&class| {
-                            self.ir.classes[class as usize]
-                                .methods
-                                .contains(&(index as krusty::ir::FunId))
+                            let class = &self.ir.classes[class as usize];
+                            class.methods.contains(&(index as krusty::ir::FunId))
+                                || self
+                                    .ir
+                                    .function_overrides
+                                    .get(&class.fq_name_id())
+                                    .into_iter()
+                                    .flatten()
+                                    .any(|edge| {
+                                        edge.implementation_function
+                                            == Some(index as krusty::ir::FunId)
+                                    })
                         }) =>
                     {
-                        // Source subclasses inherit a materialized dependency class's methods.
+                        // Source subclasses inherit a materialized dependency class's methods,
+                        // and the inherited interface defaults its published table names.
                         Linkage::Hidden
                     }
                     krusty::backend::CheckedIrUnitKind::DependencySupport => Linkage::Local,
@@ -1632,7 +1642,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if self.file.is_imported_property(target)
                     && !self.has_property_layout_at(id, target)
                 {
-                    return self.module_property_write(target, *dispatch_receiver, *value);
+                    return self.module_property_write(target, *dispatch_receiver, &[], *value);
                 }
                 match self.checked_property_at(id, target) {
                     Ok(objects::CheckedProperty::Member(class, index)) => {
@@ -2382,7 +2392,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if self.file.is_imported_property(target)
                     && !self.has_property_layout_at(id, target)
                 {
-                    return self.module_property_read(target, *dispatch_receiver);
+                    return self.module_property_read(target, *dispatch_receiver, &[]);
                 }
                 match self.checked_property_at(id, target) {
                     Ok(objects::CheckedProperty::Member(class, index)) => {

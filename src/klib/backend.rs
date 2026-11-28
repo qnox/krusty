@@ -331,24 +331,44 @@ impl KlibBackend {
         else {
             return DependencyExportSignatures::default();
         };
-        let inline_functions = super::inline_ir::collect(
+        let file_name = format!("{simple_stem}.kt");
+        let facts = super::inline_ir::BodyFacts {
+            callables: &file.callables,
+            builtins: super::inline_ir::builtin_operators(),
+            exports: &package_exports.executables,
+        };
+        let inline_functions =
+            super::inline_ir::collect(ir, &file_name, &package_exports.declarations, &facts);
+        let prepared_classes = super::class_ir::collect(
             ir,
-            &format!("{simple_stem}.kt"),
+            &file_name,
+            &classes,
             &package_exports.declarations,
-            &super::inline_ir::BodyFacts {
-                callables: &file.callables,
-                builtins: super::inline_ir::builtin_operators(),
-            },
+            &facts,
         );
+        let top_level = inline_functions
+            .iter()
+            .filter(|function| function.dispatch_receiver.is_none())
+            .count();
         // Ordinary IR is an all-or-nothing module channel. The narrow writer currently owns one
         // exact file component, so publish it only for a single-source module whose every metadata
-        // declaration is one of the exact serialized templates. Otherwise retain the independently
-        // valid prepared component without claiming that it is the module's complete body graph.
-        state.complete_main_ir &= state.fragments.is_empty()
-            && classes.is_empty()
+        // declaration is one of the exact serialized declarations. Otherwise retain the
+        // independently valid prepared component without claiming that it is the module's
+        // complete body graph.
+        let complete = state.fragments.is_empty()
             && ir.package_properties.is_empty()
             && ir.package_type_aliases.is_empty()
-            && ir.package_functions.len() == inline_functions.len();
+            && ir.package_functions.len() == top_level;
+        state.main = match (state.main.take(), complete, prepared_classes) {
+            (None, true, Some(classes)) => Some(super::inline_ir::MainFile {
+                package: segments
+                    .iter()
+                    .map(|segment| (*segment).to_owned())
+                    .collect(),
+                classes,
+            }),
+            _ => None,
+        };
         state.inline_functions.extend(inline_functions);
         state.fragments.push((package, fragment));
         package_exports.executables
@@ -362,8 +382,7 @@ impl KlibBackend {
         for (package, fragment) in state.fragments {
             writer.add_fragment(&package, fragment);
         }
-        let inline_ir =
-            super::inline_ir::artifacts(&state.inline_functions, state.complete_main_ir);
+        let inline_ir = super::inline_ir::artifacts(&state.inline_functions, state.main.as_ref());
         if !inline_ir.is_empty() {
             // The serialized types use Kotlin built-ins. This is the standard module edge a full
             // KLIB records; metadata-only libraries did not previously need one.
@@ -384,20 +403,12 @@ impl KlibBackend {
 
 /// What the backend accumulates across the files of one module: each file's fragment and the
 /// package it declares into, in compilation order.
+#[derive(Default)]
 pub struct KlibModule {
     fragments: Vec<(String, Vec<u8>)>,
     inline_functions: Vec<super::inline_ir::PreparedFunction>,
-    complete_main_ir: bool,
-}
-
-impl Default for KlibModule {
-    fn default() -> Self {
-        Self {
-            fragments: Vec::new(),
-            inline_functions: Vec::new(),
-            complete_main_ir: true,
-        }
-    }
+    /// The module's one source file, while every declaration of it is written.
+    main: Option<super::inline_ir::MainFile>,
 }
 
 impl Backend for KlibBackend {

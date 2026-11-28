@@ -1,5 +1,6 @@
 //! Checking top-level and body-local function declarations against their owned stable headers.
 
+use super::annotation_host_kind::AnnotationHostKind;
 use super::*;
 use crate::types::TyKind;
 
@@ -101,7 +102,11 @@ impl Checker<'_> {
             f.reified_type_params.contains(name)
         });
         let owned_type_parameters = self.publish_function_type_parameter_owner(scope, f);
-        let suppression_depth = self.check_function_annotation_applications(scope, f, "function");
+        let suppression_depth = self.check_function_annotation_applications(
+            scope,
+            f,
+            AnnotationHostKind::MemberFunction,
+        );
         if finalized_local_header {
             if let Some(declaration) = stable_declaration {
                 if !self.record_finalized_type_parameter_bounds(
@@ -538,6 +543,12 @@ impl Checker<'_> {
                 self.check_fun_body(scope, f, stable_declaration);
             }
             self.check_inline_parameter_usages(scope, f);
+            if let Some(declaration) = stable_declaration {
+                self.check_tailrec_calls(
+                    f,
+                    super::tailrec_calls::TailrecTarget::Declaration(declaration),
+                );
+            }
         }
         if (!self.signature_defaults_only || default_owned_method) && f.ret.is_none() {
             if let (Some(declaration), FunBody::Expr(body)) = (stable_declaration, &f.body) {
@@ -590,8 +601,11 @@ impl Checker<'_> {
                         header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
                     }) && !deferred_local_header
                 });
-        let suppression_depth =
-            self.check_function_annotation_applications(scope, f, "top level function");
+        let suppression_depth = self.check_function_annotation_applications(
+            scope,
+            f,
+            AnnotationHostKind::TopLevelFunction,
+        );
         self.check_infix_declaration(f, false);
         let owned_type_parameters = self.publish_function_type_parameter_owner(scope, f);
         if finalized_local_header || deferred_local_header {
@@ -1052,6 +1066,12 @@ impl Checker<'_> {
                 self.check_fun_body(scope, f, stable_declaration);
             }
             self.check_inline_parameter_usages(scope, f);
+            if let Some(declaration) = stable_declaration {
+                self.check_tailrec_calls(
+                    f,
+                    super::tailrec_calls::TailrecTarget::Declaration(declaration),
+                );
+            }
         }
         if !self.signature_defaults_only && check_ordinary_body && f.ret.is_none() {
             if let (Some(declaration), FunBody::Expr(body)) = (stable_declaration, &f.body) {

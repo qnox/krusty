@@ -2870,10 +2870,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             None => {
                                 if !compact_local_header {
                                     let segment = class_names.unresolved_segment(s);
-                                    diags.error(
+                                    diags.report_error(
                                         // An unresolved supertype is diagnosed at its own source span.
                                         supertype_reference_span(&classifier_header, c.span, s),
-                                        format!("unresolved reference '{segment}'."),
+                                        crate::diagnostic_wording::unresolved_reference(segment),
                                     );
                                 }
                                 s.to_string()

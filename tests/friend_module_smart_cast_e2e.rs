@@ -100,7 +100,9 @@ fn friend_access_does_not_stabilize_mutable_custom_delegated_or_open_reads() {
                     ),
                     "radius",
                     Some("Shape")
-                ),
+                )
+                .printed(krusty::diag::DiagnosticNames::Hidden)
+                .into_owned(),
             },
             common::CompilerError {
                 file: "Main.kt".to_string(),
@@ -112,7 +114,9 @@ fn friend_access_does_not_stabilize_mutable_custom_delegated_or_open_reads() {
                     ),
                     "radius",
                     Some("Shape")
-                ),
+                )
+                .printed(krusty::diag::DiagnosticNames::Hidden)
+                .into_owned(),
             },
             common::CompilerError {
                 file: "Main.kt".to_string(),
@@ -124,7 +128,9 @@ fn friend_access_does_not_stabilize_mutable_custom_delegated_or_open_reads() {
                     ),
                     "radius",
                     Some("Shape")
-                ),
+                )
+                .printed(krusty::diag::DiagnosticNames::Hidden)
+                .into_owned(),
             },
             common::CompilerError {
                 file: "Main.kt".to_string(),
@@ -136,7 +142,9 @@ fn friend_access_does_not_stabilize_mutable_custom_delegated_or_open_reads() {
                     ),
                     "radius",
                     Some("Shape")
-                ),
+                )
+                .printed(krusty::diag::DiagnosticNames::Hidden)
+                .into_owned(),
             },
         ]
     );
@@ -192,7 +200,9 @@ fn the_same_final_property_is_unstable_without_friend_access() {
                 ),
                 "radius",
                 Some("Shape")
-            ),
+            )
+            .printed(krusty::diag::DiagnosticNames::Hidden)
+            .into_owned(),
         }]
     );
     assert_eq!(

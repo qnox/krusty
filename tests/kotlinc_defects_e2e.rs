@@ -50,6 +50,8 @@ struct Defect {
     fixed_on: &'static [Platform],
     /// One `Main.kt`, its `// LANGUAGE:` directives included.
     source: &'static str,
+    /// Java sources `Main.kt` compiles against (JVM only), compiled by javac first.
+    java: &'static [(&'static str, &'static str)],
     /// What a release with the defect gives.
     with_defect: Outcome,
     /// What a release without it gives, and what the fix mode gives.
@@ -133,6 +135,26 @@ fun box(): String {
 /// `ArrayListAddAllGrowsBeforeReadingItsArgument`: a list appends a range of itself.
 const LIST_ADD_ALL_OF_ITS_RANGE: &str = include_str!("kotlinc_defects/listAddAllOfItsRange.kt");
 
+/// `JavaRenamedBuiltinEntryOverridesJavaMember`: a Java `CharSequence` whose `charAt` realizes
+/// `get`, beside a `get(int)` of its own.
+const BOTH_GET_AND_CHAR_AT: &str = "public class Both implements CharSequence {\n\
+    \x20   public int length() { return 1; }\n\
+    \x20   public char charAt(int index) { return 'c'; }\n\
+    \x20   public char get(int index) { return 'g'; }\n\
+    \x20   public CharSequence subSequence(int start, int end) { return \"\"; }\n\
+    \x20   public String toString() { return \"Both\"; }\n\
+    }\n";
+
+/// A Kotlin subclass of [`BOTH_GET_AND_CHAR_AT`] reads the Java `get` through itself and through
+/// `Both`, then the builtin `get` through `CharSequence`.
+const RENAMED_BUILTIN_OVER_JAVA_MEMBER: &str = "class Inherits : Both()\n\
+    fun box(): String {\n\
+    \x20   val inherits = Inherits()\n\
+    \x20   val both: Both = inherits\n\
+    \x20   val sequence: CharSequence = inherits\n\
+    \x20   return \"\" + inherits.get(0) + both.get(0) + sequence[0]\n\
+    }\n";
+
 /// A platform module's class over the class of a library its common module depends on. Compiled
 /// with `-Xseparate-kmp-compilation`, kotlinc-native crashes actualizing the application's
 /// fragments (KT-89466); compiled the way kotlinc's own Native box runner compiles a unit, with its
@@ -174,6 +196,7 @@ fn defect(quirk: Quirk) -> Option<Defect> {
             platforms: &[Platform::Jvm],
             fixed_on: &[],
             source: UNIT_CONVERSION,
+            java: &[],
             with_defect: Outcome::Rejected,
             fixed: Outcome::Answer("OK".to_string()),
         }),
@@ -181,6 +204,7 @@ fn defect(quirk: Quirk) -> Option<Defect> {
             platforms: &[Platform::Jvm],
             fixed_on: &[],
             source: VARARG_REFERENCE,
+            java: &[],
             with_defect: Outcome::Answer("1".to_string()),
             fixed: Outcome::Answer("2".to_string()),
         }),
@@ -188,6 +212,7 @@ fn defect(quirk: Quirk) -> Option<Defect> {
             platforms: &[Platform::Jvm],
             fixed_on: &[],
             source: NULL_FUNCTION_VALUE_CONVERSION,
+            java: &[],
             with_defect: Outcome::Answer("adapter:null".to_string()),
             fixed: Outcome::Answer("null".to_string()),
         }),
@@ -195,6 +220,7 @@ fn defect(quirk: Quirk) -> Option<Defect> {
             platforms: &[Platform::Jvm],
             fixed_on: &[],
             source: NULL_TYPE_PARAMETER_FUNCTION_VALUE_CONVERSION,
+            java: &[],
             with_defect: Outcome::Answer("NPE".to_string()),
             fixed: Outcome::Answer("null".to_string()),
         }),
@@ -202,6 +228,7 @@ fn defect(quirk: Quirk) -> Option<Defect> {
             platforms: &[Platform::Jvm],
             fixed_on: &[],
             source: TYPE_PARAMETER_FUNCTION_VALUE_CAST,
+            java: &[],
             with_defect: Outcome::Answer("CCE".to_string()),
             fixed: Outcome::Answer("adapter:y".to_string()),
         }),
@@ -209,6 +236,7 @@ fn defect(quirk: Quirk) -> Option<Defect> {
             platforms: &[Platform::Jvm],
             fixed_on: &[],
             source: CONTEXT_ARGUMENT_ORDER,
+            java: &[],
             with_defect: Outcome::Answer("crv".to_string()),
             fixed: Outcome::Answer("rcv".to_string()),
         }),
@@ -216,8 +244,17 @@ fn defect(quirk: Quirk) -> Option<Defect> {
             platforms: &[Platform::Native, Platform::WasmJs, Platform::WasmWasi],
             fixed_on: &[Platform::Jvm],
             source: LIST_ADD_ALL_OF_ITS_RANGE,
+            java: &[],
             with_defect: Outcome::Answer("raised [1, 2, 3, null, null]".to_string()),
             fixed: Outcome::Answer("appended [1, 2, 3, 1, 2]".to_string()),
+        }),
+        Quirk::JavaRenamedBuiltinEntryOverridesJavaMember => Some(Defect {
+            platforms: &[Platform::Jvm],
+            fixed_on: &[],
+            source: RENAMED_BUILTIN_OVER_JAVA_MEMBER,
+            java: &[("Both.java", BOTH_GET_AND_CHAR_AT)],
+            with_defect: Outcome::Answer("ccc".to_string()),
+            fixed: Outcome::Answer("ggc".to_string()),
         }),
         Quirk::DelegateFailureNamesFirstRungOnly
         | Quirk::InheritedHolderForwarderMapsInterfaceLine
@@ -231,7 +268,10 @@ fn defect(quirk: Quirk) -> Option<Defect> {
         | Quirk::ClassStaticsInitializeBeforeCompanionBody
         | Quirk::NotNullOperatorDropsIntersectionApproximation
         | Quirk::InvisibleCandidatesKeepScopeLevels
-        | Quirk::JvmTargetsEndAt26 => None,
+        | Quirk::JvmTargetsEndAt26
+        | Quirk::TailrecDotlessCallReportedAtOperator
+        | Quirk::TailrecUnitObjectReturnFollowsCall
+        | Quirk::TailrecElvisLeftOperandIsTail => None,
     }
 }
 
@@ -265,7 +305,7 @@ fn every_defect_and_only_a_defect_has_a_program() {
 fn kotlinc_has_each_defect_in_the_releases_the_table_names() {
     for (quirk, defect, reference) in defects() {
         for &platform in defect.platforms {
-            if let Some(outcome) = kotlinc_outcome(platform, defect.source) {
+            if let Some(outcome) = kotlinc_outcome(platform, &defect) {
                 assert_eq!(
                     outcome,
                     reference,
@@ -281,7 +321,7 @@ fn kotlinc_has_each_defect_in_the_releases_the_table_names() {
 fn krusty_reproduces_each_defect_by_default() {
     for (quirk, defect, reference) in defects() {
         for &platform in defect.platforms {
-            if let Some(outcome) = krusty_outcome(platform, defect.source, &[]) {
+            if let Some(outcome) = krusty_outcome(platform, &defect, &[]) {
                 assert_eq!(outcome, reference, "{quirk:?} on {platform:?}");
             }
         }
@@ -292,9 +332,7 @@ fn krusty_reproduces_each_defect_by_default() {
 fn fixing_kotlinc_defects_fixes_each_defect() {
     for (quirk, defect, _) in defects() {
         for &platform in defect.platforms {
-            if let Some(outcome) =
-                krusty_outcome(platform, defect.source, &["-Xfix-kotlinc-defects"])
-            {
+            if let Some(outcome) = krusty_outcome(platform, &defect, &["-Xfix-kotlinc-defects"]) {
                 assert_eq!(outcome, defect.fixed, "{quirk:?} on {platform:?}");
             }
         }
@@ -307,8 +345,8 @@ fn the_fix_is_what_the_platforms_without_the_defect_give() {
     for (quirk, defect, _) in defects() {
         for &platform in defect.fixed_on {
             for outcome in [
-                kotlinc_outcome(platform, defect.source),
-                krusty_outcome(platform, defect.source, &[]),
+                kotlinc_outcome(platform, &defect),
+                krusty_outcome(platform, &defect, &[]),
             ]
             .into_iter()
             .flatten()
@@ -321,15 +359,23 @@ fn the_fix_is_what_the_platforms_without_the_defect_give() {
 
 /// kotlinc's outcome for `source` on `platform`; `None` where kotlinc-native is neither provisioned
 /// nor recorded, or the kotlinc distribution has no Kotlin/Wasm compiler.
-fn kotlinc_outcome(platform: Platform, source: &str) -> Option<Outcome> {
+fn kotlinc_outcome(platform: Platform, defect: &Defect) -> Option<Outcome> {
+    let source = defect.source;
     match platform {
         Platform::Jvm => {
-            let arguments = common::language_directives::kotlinc_args(source);
+            let java = java_classes(defect);
+            let mut arguments = common::language_directives::kotlinc_args(source);
+            if let Some(java) = &java {
+                arguments.extend(["-cp".to_string(), path_text(java)]);
+            }
             let (code, _) = common::reference_compiler_run(&[("Main.kt", source)], &arguments);
             Some(if code != 0 {
                 Outcome::Rejected
             } else {
-                Outcome::Answer(common::kotlinc_box_result(source))
+                Outcome::Answer(common::kotlinc_box_result_with_classpath(
+                    source,
+                    java.as_slice(),
+                ))
             })
         }
         Platform::Native => common::kotlin_native_box(source).map(Outcome::Answer),
@@ -355,21 +401,45 @@ fn kotlinc_wasm_outcome(target: CompilationTarget, source: &str) -> Option<Outco
 /// Compile `source` for `platform` with the krusty CLI under `arguments` and run its `box()`;
 /// `None` for Native where this host links no Native program, and for Kotlin/Wasm, which the Wasm
 /// lane checks (see the module documentation).
-fn krusty_outcome(platform: Platform, source: &str, arguments: &[&str]) -> Option<Outcome> {
+fn krusty_outcome(platform: Platform, defect: &Defect, arguments: &[&str]) -> Option<Outcome> {
     match platform {
-        Platform::Jvm => Some(krusty_jvm_outcome(source, arguments)),
-        Platform::Native => krusty_native_outcome(source, arguments),
+        Platform::Jvm => Some(krusty_jvm_outcome(defect, arguments)),
+        Platform::Native => krusty_native_outcome(defect.source, arguments),
         Platform::WasmJs | Platform::WasmWasi => None,
     }
 }
 
-fn krusty_jvm_outcome(source: &str, arguments: &[&str]) -> Outcome {
+/// The directory javac compiles `defect`'s Java sources into, when it has any.
+fn java_classes(defect: &Defect) -> Option<std::path::PathBuf> {
+    if defect.java.is_empty() {
+        return None;
+    }
+    let sources = defect
+        .java
+        .iter()
+        .map(|(name, text)| (name.to_string(), text.to_string()))
+        .collect::<Vec<_>>();
+    let (classes, _) = common::javac_compile(&sources, &[]).expect("javac compiles the Java");
+    Some(classes)
+}
+
+fn path_text(path: &Path) -> String {
+    path.to_str().expect("UTF-8 path").to_string()
+}
+
+fn krusty_jvm_outcome(defect: &Defect, arguments: &[&str]) -> Outcome {
+    let source = defect.source;
+    let java = java_classes(defect);
     let work = common::scratch_dir().expect("allocate the CLI fixture");
     let path = work.join("Main.kt");
     let output = work.join("out");
     std::fs::write(&path, source).expect("write the CLI fixture");
     let result = std::process::Command::new(common::krusty_binary())
         .args(["-d", output.to_str().expect("UTF-8 output"), "-no-reflect"])
+        .args(
+            java.iter()
+                .flat_map(|java| ["-cp".to_string(), path_text(java)]),
+        )
         .args(arguments)
         .arg(&path)
         .output()
@@ -382,9 +452,9 @@ fn krusty_jvm_outcome(source: &str, arguments: &[&str]) -> Outcome {
     collect_classes(&output, &output, &mut classes);
     let _ = std::fs::remove_dir_all(work);
     let box_class = common::find_box_class(&classes).expect("a box() class");
-    Outcome::Answer(
-        common::run_box(&classes, &box_class, &[common::stdlib_jar()]).expect("box() answers"),
-    )
+    let mut classpath = vec![common::stdlib_jar()];
+    classpath.extend(java);
+    Outcome::Answer(common::run_box(&classes, &box_class, &classpath).expect("box() answers"))
 }
 
 fn krusty_native_outcome(source: &str, arguments: &[&str]) -> Option<Outcome> {

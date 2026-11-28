@@ -29,6 +29,8 @@ pub(super) struct BodyScope<'a> {
     pub(super) declarations: &'a DeclarationSignatures,
     pub(super) callables: &'a crate::backend::CheckedBackendCallables,
     pub(super) builtins: &'a IrBuiltinOperators,
+    /// The identities this file publishes for its classes, constructors and properties.
+    pub(super) exports: &'a crate::backend::DependencyExportSignatures,
     /// The declared type of each physical parameter slot; the dispatch receiver is slot zero.
     pub(super) parameters: &'a [Ty],
     pub(super) type_parameters: &'a [IrTypeParameter],
@@ -78,7 +80,7 @@ pub(super) enum ValueRef {
 }
 
 /// The callee a call names by exact signature.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) enum CallTarget {
     Public(KlibPublicIdSignature),
     Accessor(KlibAccessorIdSignature),
@@ -125,6 +127,34 @@ pub(super) enum BodyKind {
         origin: Option<&'static str>,
     },
     StringConcat(Vec<BodyExprId>),
+    /// `CONSTRUCTOR_CALL`: a new instance of the constructed class, `type_arguments` holding the
+    /// class's type arguments and then the constructor's own `constructor_type_arguments`.
+    ConstructorCall {
+        target: CallTarget,
+        constructor_type_arguments: u32,
+        type_arguments: Vec<Ty>,
+        arguments: Vec<BodyExprId>,
+        origin: Option<&'static str>,
+    },
+    /// A constructor's call of its superclass's or its own class's other constructor.
+    DelegatingConstructorCall {
+        target: CallTarget,
+        type_arguments: Vec<Ty>,
+        arguments: Vec<BodyExprId>,
+    },
+    /// A primary constructor's run of its class's property initializers and `init` blocks.
+    InstanceInitializerCall(crate::types::TypeName),
+    /// A read of the backing field of the property `property` signs.
+    GetField {
+        property: KlibPublicIdSignature,
+        receiver: Option<BodyExprId>,
+    },
+    /// A write of the backing field of the property `property` signs.
+    SetField {
+        property: KlibPublicIdSignature,
+        receiver: Option<BodyExprId>,
+        value: BodyExprId,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -174,6 +204,58 @@ pub(super) fn function_body(scope: &BodyScope<'_>, body: ExprId) -> Option<Funct
         .collect::<Option<Vec<_>>>()?;
     let mut body = translation.body;
     body.statements = statements;
+    Some(body)
+}
+
+/// The single expression `expression`, such as a property's initializer, with the body that
+/// holds its nodes. `None` when a node is not translated yet.
+pub(super) fn expression_body(
+    scope: &BodyScope<'_>,
+    expression: ExprId,
+) -> Option<(FunctionBody, BodyExprId)> {
+    let mut translation = Translation {
+        scope,
+        body: FunctionBody::default(),
+        locals: HashMap::default(),
+        assigned: assigned_locals(scope.ir, expression),
+    };
+    let root = translation.expr(expression)?;
+    Some((translation.body, root))
+}
+
+/// A constructor's block body: its delegation to `target` with `arguments`, then, for a primary
+/// constructor, the run of `initialized`'s property initializers. `None` when an argument is not
+/// translated yet.
+pub(super) fn constructor_body(
+    scope: &BodyScope<'_>,
+    target: CallTarget,
+    arguments: &[ExprId],
+    initialized: Option<crate::types::TypeName>,
+) -> Option<FunctionBody> {
+    let mut translation = Translation {
+        scope,
+        body: FunctionBody::default(),
+        locals: HashMap::default(),
+        assigned: HashSet::default(),
+    };
+    let arguments = arguments
+        .iter()
+        .map(|argument| translation.expr(*argument))
+        .collect::<Option<Vec<_>>>()?;
+    let mut body = translation.body;
+    let delegation = body.push(
+        Ty::Unit,
+        BodyKind::DelegatingConstructorCall {
+            target,
+            type_arguments: Vec::new(),
+            arguments,
+        },
+    );
+    body.statements.push(BodyStatement::Expression(delegation));
+    if let Some(class) = initialized {
+        let initializer = body.push(Ty::Unit, BodyKind::InstanceInitializerCall(class));
+        body.statements.push(BodyStatement::Expression(initializer));
+    }
     Some(body)
 }
 
@@ -337,7 +419,30 @@ impl Translation<'_, '_> {
                 dispatch_receiver,
                 args,
             } => self.call(expression, callee, *dispatch_receiver, args),
-            IrExpr::Checked(operation) => self.checked(operation),
+            // A virtual call of a member this file's class declares, with every argument given.
+            IrExpr::MethodCall {
+                class,
+                index,
+                receiver,
+                args,
+            } => {
+                let function = *ir
+                    .classes
+                    .get(*class as usize)?
+                    .methods
+                    .get(*index as usize)?;
+                let args = args.iter().copied().collect::<Option<Vec<_>>>()?;
+                self.call(expression, &Callee::Local(function), Some(*receiver), &args)
+            }
+            IrExpr::Checked(operation) => self.checked(expression, operation),
+            IrExpr::New {
+                internal,
+                args,
+                defaults,
+                default_prefix_count: 0,
+                external_target: None,
+                ..
+            } if defaults.is_empty() => self.construction(expression, *internal, args),
             IrExpr::UnitInstance => Some(self.unit_value()),
             _ => None,
         }
@@ -580,21 +685,24 @@ impl Translation<'_, '_> {
         args: &[ExprId],
     ) -> Option<BodyExprId> {
         let ir = self.scope.ir;
+        let mut local = false;
         let (target, ty) = match callee {
             Callee::Local(function) => {
+                local = true;
                 // A call of a generic function passes its type arguments, which common IR does not
                 // record on a local call yet.
-                if dispatch_receiver.is_some()
-                    || ir
-                        .signatures
-                        .get(function)
-                        .is_some_and(|generic| !generic.type_params.is_empty())
+                if ir
+                    .signatures
+                    .get(function)
+                    .is_some_and(|generic| !generic.type_params.is_empty())
                 {
                     return None;
                 }
-                let (signature, None) = self.scope.declarations.get(*function)? else {
+                let (signature, receiver) = self.scope.declarations.get(*function)?;
+                // A member takes its dispatch receiver, and a top-level function takes none.
+                if receiver.is_some() != dispatch_receiver.is_some() {
                     return None;
-                };
+                }
                 (
                     CallTarget::Public(signature.clone()),
                     ir.functions.get(*function as usize)?.ret,
@@ -640,11 +748,89 @@ impl Translation<'_, '_> {
             .chain(args.iter().copied())
             .map(|argument| self.expr(argument))
             .collect::<Option<Vec<_>>>()?;
+        let target = match (local, dispatch_receiver) {
+            (true, Some(_)) => self.received_on(target, arguments.first().copied())?,
+            _ => target,
+        };
         self.push(ty, call(target, arguments, None))
     }
 
-    fn checked(&mut self, operation: &IrCheckedOperation) -> Option<BodyExprId> {
+    /// The member `target` of this file's classes as `receiver`'s class names it. A member a
+    /// subclass inherits is called as that subclass's own (fake-override) member, which keeps the
+    /// declaration's member ids under the subclass's paths, as kotlinc writes it. `None` when the
+    /// receiver's class belongs to another module, whose identity this writer does not name.
+    fn received_on(&self, target: CallTarget, receiver: Option<BodyExprId>) -> Option<CallTarget> {
+        let Some(receiver) = receiver else {
+            return Some(target);
+        };
+        let TyKind::Obj(class, arguments) = self.ty(receiver).kind() else {
+            return None;
+        };
+        if !arguments.is_empty() {
+            return None;
+        }
+        let class = &self
+            .scope
+            .exports
+            .classifier(self.scope.ir.class_id_by_name(class)?)?
+            .signature;
+        let owner = match &target {
+            CallTarget::Public(signature) => signature,
+            CallTarget::Accessor(signature) => signature.property(),
+        };
+        let declared_here = owner.package() == class.package()
+            && owner.declaration().segments().split_last()?.1 == class.declaration().segments();
+        if declared_here {
+            return Some(target);
+        }
+        Some(match target {
+            CallTarget::Public(signature) => CallTarget::Public(signature.as_member_of(class)?),
+            CallTarget::Accessor(signature) => CallTarget::Accessor(signature.as_member_of(class)?),
+        })
+    }
+
+    fn checked(
+        &mut self,
+        expression: ExprId,
+        operation: &IrCheckedOperation,
+    ) -> Option<BodyExprId> {
         match operation {
+            IrCheckedOperation::PropertyRead {
+                target,
+                dispatch_receiver,
+                extension_receiver: None,
+                context_arguments,
+                substitutions,
+            } if context_arguments.is_empty() && substitutions.is_empty() => {
+                let ty = self.scope.ir.logical_type(expression)?;
+                if !self.supported(ty) {
+                    return None;
+                }
+                let getter = self.property_accessor(*target, false)?;
+                let arguments = dispatch_receiver
+                    .iter()
+                    .map(|receiver| self.expr(*receiver))
+                    .collect::<Option<Vec<_>>>()?;
+                let getter = self.received_on(getter, arguments.first().copied())?;
+                self.push(ty, call(getter, arguments, Some("GET_PROPERTY")))
+            }
+            IrCheckedOperation::PropertyWrite {
+                target,
+                dispatch_receiver,
+                extension_receiver: None,
+                context_arguments,
+                value,
+                substitutions,
+            } if context_arguments.is_empty() && substitutions.is_empty() => {
+                let setter = self.property_accessor(*target, true)?;
+                let mut arguments = dispatch_receiver
+                    .iter()
+                    .map(|receiver| self.expr(*receiver))
+                    .collect::<Option<Vec<_>>>()?;
+                let setter = self.received_on(setter, arguments.first().copied())?;
+                arguments.push(self.expr(*value)?);
+                self.push(Ty::Unit, call(setter, arguments, Some("EQ")))
+            }
             IrCheckedOperation::ExternalPropertyRead {
                 target,
                 dispatch: IrPropertyDispatch::Ordinary,
@@ -674,6 +860,50 @@ impl Translation<'_, '_> {
         }
     }
 
+    /// The identity of a property of this file's getter, or its setter.
+    fn property_accessor(
+        &self,
+        property: crate::fir::PropertyId,
+        setter: bool,
+    ) -> Option<CallTarget> {
+        property_accessor(self.scope.ir, self.scope.exports, property, setter)
+    }
+
+    /// `C(args)` of a class of this file, by the constructor checking selected.
+    fn construction(
+        &mut self,
+        expression: ExprId,
+        class: crate::types::TypeName,
+        args: &[ExprId],
+    ) -> Option<BodyExprId> {
+        let ir = self.scope.ir;
+        let ty = ir.logical_type(expression)?;
+        // A generic class passes type arguments, which this writer does not record yet.
+        if !matches!(ty.kind(), TyKind::Obj(name, arguments) if name == class && arguments.is_empty())
+        {
+            return None;
+        }
+        let target = constructor_target(
+            self.scope,
+            class,
+            *ir.construction_targets.get(&expression)?,
+        )?;
+        let arguments = args
+            .iter()
+            .map(|argument| self.expr(*argument))
+            .collect::<Option<Vec<_>>>()?;
+        self.push(
+            ty,
+            BodyKind::ConstructorCall {
+                target,
+                constructor_type_arguments: 0,
+                type_arguments: Vec::new(),
+                arguments,
+                origin: None,
+            },
+        )
+    }
+
     /// `return` without a value returns `kotlin.Unit`'s object.
     fn unit_value(&mut self) -> BodyExprId {
         self.body.push(
@@ -692,6 +922,80 @@ impl Translation<'_, '_> {
 
     fn supported(&self, ty: Ty) -> bool {
         supported_type(ty, self.scope.type_parameters)
+    }
+}
+
+/// The identity this file publishes for the constructor `target` of its class `class`.
+/// The identity of a property of this file's getter, or its setter.
+pub(super) fn property_accessor(
+    ir: &IrFile,
+    exports: &crate::backend::DependencyExportSignatures,
+    property: crate::fir::PropertyId,
+    setter: bool,
+) -> Option<CallTarget> {
+    // A written accessor is the function its body was checked as.
+    let written = match ir.local_property_layouts.get(&property)? {
+        crate::ir::IrLocalPropertyLayout::Member {
+            getter,
+            setter: written_setter,
+            ..
+        }
+        | crate::ir::IrLocalPropertyLayout::TopLevelStorage {
+            getter,
+            setter: written_setter,
+            ..
+        } => {
+            if setter {
+                *written_setter
+            } else {
+                *getter
+            }
+        }
+        _ => return None,
+    };
+    let identity = match written {
+        Some(function) => exports.callable(function)?,
+        None => {
+            let operation = if setter {
+                crate::backend::ExportedPropertyAccessor::Setter(property)
+            } else {
+                crate::backend::ExportedPropertyAccessor::Getter(property)
+            };
+            &exports
+                .property_accessors()
+                .iter()
+                .find(|(exported, _)| *exported == operation)?
+                .1
+        }
+    };
+    match &identity.declaration {
+        KlibDeclarationSignature::Accessor(signature) => {
+            Some(CallTarget::Accessor(signature.clone()))
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn constructor_target(
+    scope: &BodyScope<'_>,
+    class: crate::types::TypeName,
+    target: crate::ir::IrConstructorTarget,
+) -> Option<CallTarget> {
+    let class = scope.ir.class_id_by_name(class)?;
+    let secondary = match target.ordinal {
+        0 => None,
+        ordinal => Some(usize::try_from(ordinal - 1).ok()?),
+    };
+    let wanted = crate::backend::ExportedConstructor { class, secondary };
+    let exports = scope.exports;
+    let (_, identity) = exports
+        .constructors()
+        .iter()
+        .chain(exports.constructor_declarations())
+        .find(|(constructor, _)| *constructor == wanted)?;
+    match &identity.declaration {
+        KlibDeclarationSignature::Public(signature) => Some(CallTarget::Public(signature.clone())),
+        _ => None,
     }
 }
 

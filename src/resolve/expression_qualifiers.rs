@@ -458,13 +458,9 @@ impl Checker<'_> {
                 );
             }
         }
-        let message = crate::diagnostic_wording::unresolved_reference_on(
-            self.file.language.reference,
-            name,
-            None,
-        );
+        let message = crate::diagnostic_wording::unresolved_reference(name);
         self.diags
-            .error(self.member_name_span(callee, name), message);
+            .report_error(self.member_name_span(callee, name), message);
         Some(Ty::Error)
     }
 
