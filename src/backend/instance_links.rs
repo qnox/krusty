@@ -192,14 +192,12 @@ pub fn link_constructor_reads<V: Clone>(
 
 /// The link of each type test against another file's class that `ir` emits: an `is` or `!is`
 /// whose class `ir` does not declare and `module` certifies a file declares. One `module` does
-/// not certify has no link, and the target declines it. `realized_test` names the class a call the
-/// target lowers as a type test (a class literal's `isInstance`) tests, so that test links as the
-/// `is` it stands for.
+/// not certify has no link, and the target declines it. A class literal names its class, and so
+/// does a call of `KClass.isInstance` on one, whose receiver is that literal.
 pub fn link_type_test_reads<V: Clone>(
     ir: &IrFile,
     module: &BackendModuleFacts,
     links: &mut ModuleLinks<InstanceEntry, V>,
-    realized_test: impl Fn(&IrExpr) -> Option<crate::types::Ty>,
     mut allocate: impl FnMut() -> V,
 ) -> HashMap<InstanceEntry, V> {
     let mut reads = HashMap::default();
@@ -213,10 +211,12 @@ pub fn link_type_test_reads<V: Clone>(
                 type_operand,
                 ..
             } => *type_operand,
-            other => match realized_test(other) {
-                Some(tested) => tested,
-                None => continue,
-            },
+            IrExpr::KClassLiteral {
+                classifier: Some(tested),
+                value: None,
+                type_argument: false,
+            } => *tested,
+            _ => continue,
         };
         let Some(classifier) = tested.non_null().obj_internal() else {
             continue;

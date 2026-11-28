@@ -9,9 +9,8 @@
 //! facts common IR recorded for it, any other from the declaration name its provider published.
 
 use krusty::backend::class_names::{declared_class, published_classifier};
-use krusty::backend::BackendCallableFact;
 use krusty::libraries::{ClassNameKind, CompilerIntrinsic};
-use krusty::types::{wk, SemanticCallableOwner, TypeName};
+use krusty::types::{wk, TypeName};
 
 use crate::class_tokens::{emit_runtime_info, QUALIFIED_NAME_FIELD, SIMPLE_NAME_FIELD};
 
@@ -216,16 +215,6 @@ pub(super) fn name_type_infos(
     }
 }
 
-/// Whether the selected declaration `fact` is `KClass.isInstance(value: Any?): Boolean`.
-pub(in crate::codegen) fn is_class_is_instance(fact: &BackendCallableFact) -> bool {
-    matches!(
-        fact.declaration_owner,
-        Some(SemanticCallableOwner::Classifier(owner)) if owner == wk::kclass()
-    ) && fact.name == "isInstance"
-        && fact.params.as_slice() == [Ty::nullable(objects::any())]
-        && fact.ret == Ty::Boolean
-}
-
 /// The receiver and operands of `node` when it is a call of `KClass.isInstance`.
 fn class_is_instance_call<'n>(
     callables: &krusty::backend::CheckedBackendCallables,
@@ -246,9 +235,9 @@ fn class_is_instance_call<'n>(
         return None;
     };
     (defaults.is_empty()
-        && callables
-            .callable(*target)
-            .is_some_and(is_class_is_instance))
+        && callables.callable(*target).is_some_and(|fact| {
+            fact.compiler_operation() == Some(krusty::libraries::CompilerIntrinsic::ClassIsInstance)
+        }))
     .then_some((*receiver, args.as_slice()))
 }
 
@@ -262,24 +251,4 @@ fn class_literal_target(ir: &IrFile, receiver: u32) -> Option<Ty> {
         } => Some(ty.non_null()),
         _ => None,
     }
-}
-
-/// The class a class literal, or a call of `KClass.isInstance` on one, tests a value against: the
-/// class its type test reads, which a cross-file link must name before the body is emitted. A
-/// literal registers that test for every `isInstance` of a token over its record.
-pub(in crate::codegen) fn class_is_instance_target(
-    ir: &IrFile,
-    callables: &krusty::backend::CheckedBackendCallables,
-    node: &IrExpr,
-) -> Option<Ty> {
-    if let IrExpr::KClassLiteral {
-        classifier: Some(ty),
-        value: None,
-        type_argument: false,
-    } = node
-    {
-        return Some(ty.non_null());
-    }
-    let (receiver, _) = class_is_instance_call(callables, node)?;
-    class_literal_target(ir, receiver)
 }

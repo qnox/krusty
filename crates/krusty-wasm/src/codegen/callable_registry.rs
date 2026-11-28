@@ -276,7 +276,6 @@ impl CallableRegistry {
                     ir,
                     module_facts,
                     &mut self.instances,
-                    |node| super::lower::class_is_instance_target(ir, callables, node),
                     || wasm.declare(),
                 ));
                 reads
