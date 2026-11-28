@@ -345,6 +345,16 @@ pub(crate) fn collect_assignability_constraints_from_symbols(
     }
 }
 
+/// The type variable under any flexibility, nullability, or definite non-nullness wrapper.
+fn self_occurrence(ty: Ty) -> Ty {
+    match ty.kind() {
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::DefinitelyNotNull(inner) => self_occurrence(inner),
+        _ => ty,
+    }
+}
+
 pub(crate) struct InferredCallBindings {
     pub bindings: GSigBinds,
     /// Every lower constraint before it is approximated to one denotable binding. Callers that
@@ -489,7 +499,9 @@ impl CallInferenceConstraints {
             return false;
         }
         let actual = inference_actual(actual);
-        if matches!(actual.kind(), TyKind::TyParam(actual_name, _) | TyKind::Var(actual_name, _) if actual_name == name)
+        // A variable's constraint on itself says nothing, however its occurrence is flexible or
+        // nullable (`T <: T!`, `T <: T?`).
+        if matches!(self_occurrence(actual).kind(), TyKind::TyParam(actual_name, _) | TyKind::Var(actual_name, _) if actual_name == name)
         {
             return false;
         }

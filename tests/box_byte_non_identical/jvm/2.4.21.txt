@@ -2126,6 +2126,7 @@ regressions/interfaceDelegateCaptureLifetimes.kt
 regressions/interfaceDelegationForwardsHiddenDeprecatedMembers.kt
 regressions/intersectionArgumentFixedByInvariantSibling.kt
 regressions/invisibleJavaFieldYieldsToExtensionProperty.kt
+regressions/javaPlatformElementKeptThroughLambda.kt
 regressions/knownPrimaryConstructorRoles.kt
 regressions/kt10143.kt
 regressions/kt1172.kt
