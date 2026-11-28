@@ -123,7 +123,6 @@ boxingOptimization/kt5844.kt
 boxingOptimization/safeCallWithElvis.kt
 boxingOptimization/safeCallWithElvisMultipleFiles.kt
 boxingOptimization/unsignedArrayForEach.kt
-branching/when_with_try1.kt
 bridges/delegationComplex.kt
 bridges/delegationComplexWithList.kt
 bridges/fakeCovariantOverride.kt
@@ -2110,7 +2109,6 @@ localClasses/inLocalExtensionProperty.kt
 localClasses/kt10835.kt
 localClasses/kt10835a.kt
 localClasses/kt2700.kt
-localClasses/kt3389.kt
 localClasses/kt3584.kt
 localClasses/kt4174.kt
 localClasses/kt45383.kt
@@ -2721,7 +2719,6 @@ regressions/crossinlineReferenceToPrivateFunctionAcrossModules.kt
 regressions/dataClassCallableReferenceEquality.kt
 regressions/dataClassCallableReferenceSelfEquality.kt
 regressions/dataClassEqualsAndHashCode.kt
-regressions/dataClassInInlineFunctionWithTypeParameters.kt
 regressions/dataClassInRegularFunctionWithTypeParameters.kt
 regressions/dataClassNullableBoundReference.kt
 regressions/declarationColonOnNextLine.kt
@@ -2884,7 +2881,6 @@ regressions/multimodule/suspendStateMachineExternalCps.kt
 regressions/multimodule/valueClassBoxedInAnotherModule.kt
 regressions/multimodule/valueClassCompanionBlockLibrary.kt
 regressions/multimodule/valueClassConstructedInAnotherModule.kt
-regressions/multimodule/whenSubjectNoBranchMatched.kt
 regressions/namedInterfaceDelegateOrder.kt
 regressions/nestedGenericCallTakesOutermostParameter.kt
 regressions/nestedResultOfEnclosingTypeParameter.kt
@@ -2926,7 +2922,6 @@ regressions/reifiedTypeTestInEscapingLambda.kt
 regressions/reifiedTypeTestInObject.kt
 regressions/rigid.kt
 regressions/runtimeArrayListInterfaceTests.kt
-regressions/runtimeExceptionConstructors.kt
 regressions/safeCallLambdaImplicitLabel.kt
 regressions/safeCastNonNullSmartCast.kt
 regressions/samConvertedReference.kt
@@ -2939,6 +2934,7 @@ regressions/sourceKPropertyName.kt
 regressions/starImportOfCompanionBlock.kt
 regressions/suspendCallsInConditions.kt
 regressions/suspendCoroutineResultInTypedLocal.kt
+regressions/suspendCoroutineUnitKeepsSuspension.kt
 regressions/suspendLambdaCompletions.kt
 regressions/suspendLambdaInlinedObjectCrossinline.kt
 regressions/suspendLambdaLabeledReturn.kt
@@ -3044,8 +3040,6 @@ secondaryConstructors/fieldInitializerOptimization.kt
 secondaryConstructors/localClasses.kt
 serialization/deserializedMembers.kt
 serialization/serializedDefaultArgs.kt
-smartCasts/avoidSmartCastToDerivedForPrivate.kt
-smartCasts/falseSmartCast.kt
 smartCasts/genericSet.kt
 smartCasts/implicitMemberReceiver.kt
 smartCasts/invokeRecieverSmartcastK2.kt
