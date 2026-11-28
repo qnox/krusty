@@ -291,12 +291,29 @@ pub(super) fn emit_dependencies<B: Backend>(
     // Category ownership is a declaration capability, not an emission-success test. An intrinsic
     // wrapper whose unsupported body transaction declines must not be retried as an ordinary body.
     let intrinsic_roots: HashSet<_> = roots.iter().map(|root| root.identity()).collect();
-    // A function a source module of this program declares and exports is called, never lowered a
-    // second time from the body its own KLIB also records.
+    // A function, constructor or accessor a source module of this program declares and exports is
+    // called, never lowered a second time from the body its own KLIB also records.
     let source_exports: HashSet<&KlibDependencyCallable> = uses
         .iter()
-        .flat_map(|use_| use_.file.dependency_exports.callables())
-        .map(|(_, identity)| identity)
+        .flat_map(|use_| {
+            let exports = &use_.file.dependency_exports;
+            exports
+                .callables()
+                .map(|(_, identity)| identity)
+                .chain(exports.constructors().iter().map(|(_, identity)| identity))
+                .chain(
+                    exports
+                        .constructor_declarations()
+                        .iter()
+                        .map(|(_, identity)| identity),
+                )
+                .chain(
+                    exports
+                        .property_accessors()
+                        .iter()
+                        .map(|(_, identity)| identity),
+                )
+        })
         .collect();
     ordinary.retain(|root| {
         let intrinsic_owned = intrinsic_roots.contains(root.identity());

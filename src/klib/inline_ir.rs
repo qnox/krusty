@@ -8,7 +8,7 @@
 //! function with a reified own type parameter.
 
 use super::body_encoding::BodyEncoder;
-use super::body_tree::{BodyScope, FunctionBody};
+use super::body_tree::{BodyScope, CallTarget, FunctionBody};
 use super::ir_tables::{
     declaration_table, entry_table, lattice, per_file, symbol, IrTables, CONSTRUCTOR_SYMBOL,
     FUNCTION_SYMBOL, RECEIVER_PARAMETER_SYMBOL, TYPE_PARAMETER_SYMBOL, VALUE_PARAMETER_SYMBOL,
@@ -18,7 +18,7 @@ use crate::ir::{FunId, IrExpr, IrFile, IrParameterRole, IrTypeOp};
 use crate::klib_lowering::ir_builtins::IrBuiltinOperators;
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::protobuf::Pb;
-use crate::types::{Ty, TypeVariance};
+use crate::types::{Ty, TypeName, TypeVariance};
 
 const MAIN_PREFIX: &str = "default/ir/";
 const PREPARED_PREFIX: &str = "default/ir_inlinable_functions/";
@@ -53,31 +53,37 @@ impl DeclarationSignatures {
 
 #[derive(Clone)]
 pub(super) struct PreparedFunction {
-    signature: KlibPublicIdSignature,
-    name: String,
-    file_name: String,
-    flags: u64,
-    inline_only: bool,
+    pub(super) signature: CallTarget,
+    pub(super) name: String,
+    /// `DEFINED`, or `DEFAULT_PROPERTY_ACCESSOR` for an accessor the compiler supplies.
+    pub(super) origin: &'static str,
+    pub(super) file_name: String,
+    pub(super) flags: u64,
+    pub(super) inline_only: bool,
     /// Whether the declaration is `inline`, and so also owns a prepared copy.
-    inline: bool,
-    dispatch_receiver: Option<Ty>,
-    parameters: Vec<PreparedParameter>,
-    context_count: usize,
-    extension_parameter: Option<usize>,
-    result: Ty,
-    type_parameters: Vec<PreparedTypeParameter>,
-    body: FunctionBody,
+    pub(super) inline: bool,
+    pub(super) dispatch_receiver: Option<Ty>,
+    pub(super) parameters: Vec<PreparedParameter>,
+    pub(super) context_count: usize,
+    pub(super) extension_parameter: Option<usize>,
+    pub(super) result: Ty,
+    pub(super) type_parameters: Vec<PreparedTypeParameter>,
+    /// The members of the direct supertypes this member overrides.
+    pub(super) overridden: Vec<CallTarget>,
+    /// The declaration's place among its file's declarations, shared with classes.
+    pub(super) source_order: Option<u32>,
+    pub(super) body: FunctionBody,
 }
 
 #[derive(Clone)]
-struct PreparedParameter {
-    name: String,
-    ty: Ty,
-    default_null: bool,
+pub(super) struct PreparedParameter {
+    pub(super) name: String,
+    pub(super) ty: Ty,
+    pub(super) default_null: bool,
 }
 
 #[derive(Clone)]
-struct PreparedTypeParameter {
+pub(super) struct PreparedTypeParameter {
     name: String,
     ty: Ty,
     bounds: Vec<Ty>,
@@ -89,6 +95,7 @@ struct PreparedTypeParameter {
 pub(super) struct BodyFacts<'a> {
     pub(super) callables: &'a crate::backend::CheckedBackendCallables,
     pub(super) builtins: &'a IrBuiltinOperators,
+    pub(super) exports: &'a crate::backend::DependencyExportSignatures,
 }
 
 /// The compiler built-in operators bodies call, signed once per process.
@@ -140,7 +147,7 @@ pub(super) fn collect(
     functions
 }
 
-fn prepared_function(
+pub(super) fn prepared_function(
     ir: &IrFile,
     file_name: &str,
     declarations: &DeclarationSignatures,
@@ -166,18 +173,7 @@ fn prepared_function(
         // parameter writer does not yet encode.
         return None;
     }
-    let overrides_declaration = ir.function_overrides.values().flatten().any(|edge| {
-        edge.implementation_function == Some(function)
-            || matches!(
-                edge.implementation,
-                crate::fir::ResolvedFunctionOverrideTarget::Module(callable)
-                    if ir.checked_callable_functions.get(&callable) == Some(&function)
-            )
-    });
-    if ir.open_methods.contains(&function) || overrides_declaration {
-        // The prepared wrapper's overridden-symbol list must be complete for virtual members.
-        return None;
-    }
+    let overridden = overridden_members(ir, declarations, facts, function, *dispatch_receiver)?;
     // Only a generic function records a generic signature; any other function's signature is
     // exactly its declaration's physical parameters and result.
     let own_signature;
@@ -209,6 +205,7 @@ fn prepared_function(
             declarations,
             callables: facts.callables,
             builtins: facts.builtins,
+            exports: facts.exports,
             parameters: &slots,
             type_parameters: &generic.type_params,
         },
@@ -300,8 +297,9 @@ fn prepared_function(
     let flags = crate::metadata::declaration_flags::function_flags(ir, function, declaration)
         | u64::from(inline_only);
     Some(PreparedFunction {
-        signature: signature.clone(),
+        signature: CallTarget::Public(signature.clone()),
         name: ir.fn_source_names.get(&function)?.clone(),
+        origin: "DEFINED",
         file_name: file_name.to_owned(),
         flags,
         inline_only,
@@ -322,8 +320,118 @@ fn prepared_function(
                 reified: parameter.reified,
             })
             .collect(),
+        overridden,
+        source_order: ir.fn_source_order.get(&function).copied(),
         body,
     })
+}
+
+/// The members of `function`'s owner's direct supertypes that it overrides, by the identities
+/// kotlinc records. A top-level function overrides nothing. `None` when an overridden member has
+/// no identity this writer can name: the list a member records must be exact.
+fn overridden_members(
+    ir: &IrFile,
+    declarations: &DeclarationSignatures,
+    facts: &BodyFacts<'_>,
+    function: FunId,
+    dispatch_receiver: Option<Ty>,
+) -> Option<Vec<CallTarget>> {
+    let edges = ir
+        .function_overrides
+        .values()
+        .flatten()
+        .filter(|edge| {
+            edge.implementation_function == Some(function)
+                || matches!(
+                    edge.implementation,
+                    crate::fir::ResolvedFunctionOverrideTarget::Module(callable)
+                        if ir.checked_callable_functions.get(&callable) == Some(&function)
+                )
+        })
+        .collect::<Vec<_>>();
+    if edges.is_empty() {
+        return Some(Vec::new());
+    }
+    let owner = dispatch_receiver?.obj_internal()?;
+    let class = &ir.classes[ir.class_id_by_name(owner)? as usize];
+    let mut overridden = Vec::new();
+    for edge in edges {
+        if edge.implementation_function.is_some() {
+            return None;
+        }
+        let signature = match edge.overridden {
+            crate::fir::ResolvedFunctionOverrideTarget::Module(callable) => {
+                let overridden = *ir.checked_callable_functions.get(&callable)?;
+                let (signature, Some(_)) = declarations.get(overridden)? else {
+                    return None;
+                };
+                signature.clone()
+            }
+            crate::fir::ResolvedFunctionOverrideTarget::External(callable) => match &facts
+                .callables
+                .callable(callable)?
+                .dependency_callable
+                .as_ref()?
+                .declaration
+            {
+                crate::libraries::KlibDeclarationSignature::Public(signature) => signature.clone(),
+                _ => return None,
+            },
+        };
+        for named in inherited_names(ir, facts, class, edge.overridden_owner)? {
+            let named = CallTarget::Public(match named {
+                None => signature.clone(),
+                Some(supertype) => signature.as_member_of(supertype)?,
+            });
+            if !overridden.contains(&named) {
+                overridden.push(named);
+            }
+        }
+    }
+    Some(overridden)
+}
+
+/// How each direct supertype of `class` that reaches `owner` names a member `owner` declares:
+/// `None` for `owner` itself, or the class signature of a supertype that only inherits it, under
+/// whose paths kotlinc names the inherited (fake-override) member with the declaration's member
+/// id. `None` overall when such a path crosses a class this writer cannot name.
+pub(super) fn inherited_names<'f>(
+    ir: &IrFile,
+    facts: &BodyFacts<'f>,
+    class: &crate::ir::IrClass,
+    owner: TypeName,
+) -> Option<Vec<Option<&'f KlibPublicIdSignature>>> {
+    let mut names = Vec::new();
+    for supertype in std::iter::once(class.superclass).chain(class.interfaces.iter()) {
+        if supertype == owner {
+            names.push(None);
+        } else if inherits(ir, supertype, owner)? {
+            let inheriting = ir.class_id_by_name(supertype)?;
+            if !ir.classes[inheriting as usize].type_params.is_empty() {
+                return None;
+            }
+            names.push(Some(&facts.exports.classifier(inheriting)?.signature));
+        }
+    }
+    Some(names)
+}
+
+/// Whether the module class `class` inherits from `ancestor` through a proper supertype, or
+/// `None` when the path would cross a class of another module this writer cannot walk.
+fn inherits(ir: &IrFile, class: TypeName, ancestor: TypeName) -> Option<bool> {
+    let Some(id) = ir.class_id_by_name(class) else {
+        // A class of another module cannot inherit this module's classes, and `kotlin.Any` has
+        // no supertypes; any other dependency class is not walked here.
+        let unrelated = class.matches("kotlin/Any") || ir.class_id_by_name(ancestor).is_some();
+        return unrelated.then_some(false);
+    };
+    let declaration = &ir.classes[id as usize];
+    for supertype in std::iter::once(declaration.superclass).chain(declaration.interfaces.iter()) {
+        if supertype == ancestor || inherits(ir, supertype, ancestor)? {
+            return Some(true);
+        }
+    }
+    Some(false)
 }
 
 /// Common lowering preserves the checked conversion from literal `null` to its declared nullable
@@ -379,7 +487,7 @@ fn is_reified_type_test(
 }
 
 #[derive(Clone, Copy)]
-enum Component {
+pub(super) enum Component {
     Main,
     Prepared,
 }
@@ -404,9 +512,16 @@ impl Component {
 }
 
 /// Lay the collected functions out as Kotlin 2.4's ordinary and prepared-inline IR components.
+/// The declarations of the module's one source file its ordinary IR component records, in
+/// declaration order, with the file's package.
+pub(super) struct MainFile {
+    pub(super) package: Vec<String>,
+    pub(super) classes: Vec<super::class_ir::PreparedClass>,
+}
+
 pub(super) fn artifacts(
     functions: &[PreparedFunction],
-    complete_main_ir: bool,
+    main: Option<&MainFile>,
 ) -> Vec<(String, Vec<u8>)> {
     let inline = functions
         .iter()
@@ -414,50 +529,70 @@ pub(super) fn artifacts(
         .cloned()
         .collect::<Vec<_>>();
     let mut artifacts = Vec::new();
-    if complete_main_ir && !functions.is_empty() {
-        artifacts.extend(component_artifacts(functions, Component::Main));
+    // A member is written within its class.
+    let top_level = functions
+        .iter()
+        .filter(|function| function.dispatch_receiver.is_none())
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(main) = main.filter(|main| !top_level.is_empty() || !main.classes.is_empty()) {
+        artifacts.extend(component_artifacts(
+            &top_level,
+            &main.classes,
+            Some(&main.package),
+            Component::Main,
+        ));
     }
     if !inline.is_empty() {
-        artifacts.extend(component_artifacts(&inline, Component::Prepared));
+        artifacts.extend(component_artifacts(&inline, &[], None, Component::Prepared));
     }
     artifacts
 }
 
 fn component_artifacts(
     functions: &[PreparedFunction],
+    classes: &[super::class_ir::PreparedClass],
+    package: Option<&[String]>,
     component: Component,
 ) -> Vec<(String, Vec<u8>)> {
     let mut writer = FileWriter::default();
-    let mut declarations = Vec::with_capacity(functions.len());
-    for function in functions {
-        declarations.push(writer.function(function, component));
+    // Kotlin lists a file's classes and functions in source order.
+    let mut ordered = classes
+        .iter()
+        .map(|class| (Some(class.source_order()), Ok(class)))
+        .chain(
+            functions
+                .iter()
+                .map(|function| (function.source_order, Err(function))),
+        )
+        .collect::<Vec<_>>();
+    ordered.sort_by_key(|(order, _)| order.unwrap_or(u32::MAX));
+    let mut declarations = Vec::with_capacity(ordered.len());
+    for (_, declaration) in ordered {
+        declarations.push(match declaration {
+            Ok(class) => super::class_ir::ClassWriter::new(&mut writer).class(class),
+            Err(function) => writer.function(function, component),
+        });
     }
     let ids = declarations
         .iter()
         .map(|(signature, _)| u64::from(*signature))
         .collect::<Vec<_>>();
-    let package = match component {
-        Component::Main => {
-            let package = functions[0].signature.package();
-            assert!(
-                functions
-                    .iter()
-                    .all(|function| function.signature.package() == package),
-                "one ordinary IrFile cannot contain declarations from different packages"
-            );
+    let package = match (component, package) {
+        (Component::Main, Some(package)) => {
             if package.is_empty() {
                 vec![u64::from(writer.tables.string(""))]
             } else {
                 package
-                    .segments()
                     .iter()
                     .map(|segment| u64::from(writer.tables.string(segment)))
                     .collect::<Vec<_>>()
             }
         }
+        (Component::Main, None) => unreachable!("an ordinary IrFile names its package"),
         // Kotlin's prepared-inline component uses one synthetic root file rather than any
         // declaration's source package. Its IrFile records that root as one empty segment.
-        Component::Prepared => vec![u64::from(writer.tables.string(""))],
+        (Component::Prepared, _) => vec![u64::from(writer.tables.string(""))],
     };
     let root_file_entry = writer.tables.file_entry(component.root_file_name());
     let mut file = Pb::new();
@@ -500,13 +635,41 @@ fn component_artifacts(
 }
 
 #[derive(Default)]
-struct FileWriter {
-    tables: IrTables,
+pub(super) struct FileWriter {
+    pub(super) tables: IrTables,
 }
 
 impl FileWriter {
-    fn function(&mut self, function: &PreparedFunction, component: Component) -> (u32, Vec<u8>) {
-        let declaration_signature = self.tables.public_signature(&function.signature);
+    /// The function's `IrDeclaration`, keyed by its signature's table index.
+    pub(super) fn function(
+        &mut self,
+        function: &PreparedFunction,
+        component: Component,
+    ) -> (u32, Vec<u8>) {
+        let (signature, function_wrapper) = self.function_declaration(function, component);
+        let mut declaration = Pb::new();
+        declaration.field_message(6, &function_wrapper);
+        (signature, declaration.canonical().into_bytes())
+    }
+
+    /// The function's `IrFunction` message, as a property holds its accessors.
+    pub(super) fn function_message(
+        &mut self,
+        function: &PreparedFunction,
+        component: Component,
+    ) -> Pb {
+        self.function_declaration(function, component).1
+    }
+
+    fn function_declaration(
+        &mut self,
+        function: &PreparedFunction,
+        component: Component,
+    ) -> (u32, Pb) {
+        let declaration_signature = match &function.signature {
+            CallTarget::Public(signature) => self.tables.public_signature(signature),
+            CallTarget::Accessor(signature) => self.tables.accessor_signature(signature),
+        };
         let symbol_signature = match component {
             Component::Main => declaration_signature,
             Component::Prepared => {
@@ -554,7 +717,7 @@ impl FileWriter {
             .collect::<Vec<_>>();
         let mut base = Pb::new();
         base.field_varint(1, declaration_symbol);
-        base.field_varint(2, u64::from(self.tables.string("DEFINED")));
+        base.field_varint(2, u64::from(self.tables.string(function.origin)));
         let flags = match component {
             Component::Main => function.flags,
             // A prepared declaration is a private copy even when the metadata and ordinary IR
@@ -632,13 +795,23 @@ impl FileWriter {
         function_base.field_varint(7, u64::from(body));
         let mut function_wrapper = Pb::new();
         function_wrapper.field_message(1, &function_base);
+        let overridden = function
+            .overridden
+            .iter()
+            .map(|target| {
+                let signature = match target {
+                    CallTarget::Public(signature) => self.tables.public_signature(signature),
+                    CallTarget::Accessor(signature) => self.tables.accessor_signature(signature),
+                };
+                symbol(signature, FUNCTION_SYMBOL)
+            })
+            .collect::<Vec<_>>();
+        function_wrapper.field_packed_varints(2, &overridden);
         if matches!(component, Component::Prepared) {
             let file_entry = self.tables.file_entry(&function.file_name);
             function_wrapper.field_varint(3, u64::from(file_entry));
         }
-        let mut declaration = Pb::new();
-        declaration.field_message(6, &function_wrapper);
-        (declaration_signature, declaration.canonical().into_bytes())
+        (declaration_signature, function_wrapper)
     }
 
     fn parameter(
@@ -950,8 +1123,9 @@ mod tests {
         let parameter = Ty::ty_param("fixture.T", bound);
         (
             PreparedFunction {
-                signature: signature.clone(),
+                signature: CallTarget::Public(signature.clone()),
                 name: "probe".to_owned(),
+                origin: "DEFINED",
                 file_name: "Probe.kt".to_owned(),
                 flags: 1030,
                 inline_only: false,
@@ -972,6 +1146,8 @@ mod tests {
                     variance: TypeVariance::Invariant,
                     reified: true,
                 }],
+                overridden: Vec::new(),
+                source_order: None,
                 body: returning(|body| {
                     let argument = body.push(
                         Ty::nullable(Ty::obj("kotlin/Any")),
@@ -1001,6 +1177,20 @@ mod tests {
         body
     }
 
+    fn fixture_main() -> MainFile {
+        main_in(&["fixture"])
+    }
+
+    fn main_in(package: &[&str]) -> MainFile {
+        MainFile {
+            package: package
+                .iter()
+                .map(|segment| (*segment).to_owned())
+                .collect(),
+            classes: Vec::new(),
+        }
+    }
+
     fn fixture() -> (PreparedFunction, KlibPublicIdSignature) {
         fixture_in(&["fixture"])
     }
@@ -1008,7 +1198,7 @@ mod tests {
     #[test]
     fn root_package_main_file_records_one_empty_segment() {
         let (function, _) = fixture_in(&[]);
-        let artifacts = artifacts(&[function], true);
+        let artifacts = artifacts(&[function], Some(&main_in(&[])));
         let raw_entry = |name: &str| {
             artifacts
                 .iter()
@@ -1028,7 +1218,7 @@ mod tests {
     #[test]
     fn multi_segment_main_file_records_each_package_segment() {
         let (function, _) = fixture_in(&["fixture", "inline"]);
-        let artifacts = artifacts(&[function], true);
+        let artifacts = artifacts(&[function], Some(&main_in(&["fixture", "inline"])));
         let raw_entry = |name: &str| {
             artifacts
                 .iter()
@@ -1048,7 +1238,7 @@ mod tests {
     #[test]
     fn prepared_inline_component_round_trips_exact_type_test_and_provenance() {
         let (function, signature) = fixture();
-        let artifacts = artifacts(&[function], true);
+        let artifacts = artifacts(&[function], Some(&fixture_main()));
         assert_eq!(artifacts.len(), 16);
         assert_eq!(Component::Main.root_file_name(), "<krusty-main-ir>");
         assert_eq!(
@@ -1221,7 +1411,7 @@ mod tests {
         let (mut skipped, _) = fixture();
         let skipped_signature =
             KlibPublicIdSignature::classifier(TypeName::from("fixture/skipped"));
-        skipped.signature = skipped_signature.clone();
+        skipped.signature = CallTarget::Public(skipped_signature.clone());
         skipped.name = "skipped".to_owned();
 
         let root = std::env::temp_dir().join(format!(
@@ -1231,7 +1421,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         let mut writer = crate::klib::write::KlibWriter::native_test_fixture("fixture");
-        for (name, bytes) in artifacts(&[kept, skipped], true) {
+        for (name, bytes) in artifacts(&[kept, skipped], Some(&fixture_main())) {
             writer.add_file(&name, bytes);
         }
         for (name, bytes) in writer.entries() {
@@ -1276,7 +1466,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         let mut writer = crate::klib::write::KlibWriter::native_test_fixture("fixture");
-        for (name, bytes) in artifacts(&[function], true) {
+        for (name, bytes) in artifacts(&[function], Some(&fixture_main())) {
             writer.add_file(&name, bytes);
         }
         for (name, bytes) in writer.entries() {
@@ -1358,7 +1548,7 @@ mod tests {
             function.parameters[0].default_null = false;
             function.result = Ty::obj("kotlin/Any");
             function.body = body;
-            let artifacts = artifacts(&[function], true);
+            let artifacts = artifacts(&[function], Some(&fixture_main()));
             assert!(
                 artifacts
                     .iter()

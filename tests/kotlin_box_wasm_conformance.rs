@@ -2035,6 +2035,64 @@ fn wasm_library_abstract_members_dispatch_to_their_overrides() {
     expect_wasm_box(src, "libraryAbstractMemberCalls");
 }
 
+#[test]
+fn wasm_links_a_library_s_class_bodies_from_its_klib() {
+    let source = include_str!("box_regressions/multimodule/libraryClassBodies.kt");
+    let stem = "wasmLibraryClassBodies";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the exact Kotlin compiler must run the whole library-classes program");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_klib_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "{stem} on {}",
+            target.name(),
+        );
+    }
+}
+
+/// The KLIB writer has no IR type for a function type yet, so a class storing one keeps its file
+/// metadata-only rather than reaching the type table with a type it cannot write.
+#[test]
+fn wasm_keeps_a_function_typed_property_s_class_out_of_its_klib_s_bodies() {
+    let source = include_str!("box_regressions/multimodule/libraryFunctionTypedProperty.kt");
+    let stem = "wasmLibraryFunctionTypedProperty";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the exact Kotlin compiler must run the function-typed property program");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_klib_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Declined(
+                concat!(
+                    "a dependency callable whose target code was not emitted: `run`; ",
+                    r#"selected declaration KlibDependencyCallable { module: "lib", declaration: Public(KlibPublicIdSignature { package: KlibNamePath { segments: ["fixture"] }, declaration: KlibNamePath { segments: ["Holder", "run"] }, member_id: Some(17455565997157616742), mask: 0 }) }; "#,
+                    r#"owner Some(Classifier(TypeName("fixture/Holder"))); "#,
+                    "kind Member; ",
+                    "realization Dispatch; ",
+                    "checked parameters []; ",
+                    r#"checked result Obj(TypeName("kotlin/String"), []); "#,
+                    "provider parameters []; ",
+                    r#"provider result Obj(TypeName("kotlin/String"), []); "#,
+                    "declared parameters Some([]); ",
+                    "declared result None; ",
+                    "compiler operation None",
+                )
+                .to_owned()
+            ),
+            "{stem} on {}",
+            target.name(),
+        );
+    }
+}
+
 /// The KLIB writer does not record a local call's type arguments yet, so a body calling a generic
 /// function of its own file stays metadata-only rather than holding a call kotlinc cannot read.
 #[test]

@@ -1170,3 +1170,19 @@ fn native_links_a_library_s_top_level_function_bodies_from_its_klib() {
         Outcome::Pass
     );
 }
+
+#[test]
+fn native_links_a_library_s_class_bodies_from_its_klib() {
+    let source = include_str!("box_regressions/multimodule/libraryClassBodies.kt");
+    let stem = "nativeLibraryClassBodies";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the exact Kotlin compiler must run the whole library-classes program");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    let lane = NativeLane { target: host() };
+    assert_eq!(lane.unavailable(), None);
+    assert_eq!(
+        lane.compile_klib_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+        Outcome::Pass
+    );
+}
