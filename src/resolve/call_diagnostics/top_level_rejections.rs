@@ -607,9 +607,7 @@ fn lambda_bound_rejection_reason(
     let taken = lambda_arity.min(value_params.len());
     let actual = render_function_type(&value_params[..taken], function.ret, &owner, formals);
     let expected = render_function_type(value_params, function.ret, &owner, formals);
-    Some(format!(
-        "Argument type mismatch: actual type is '{actual}', but '{expected}' was expected."
-    ))
+    Some(crate::diagnostic_wording::argument_type_mismatch(&actual, &expected).message)
 }
 
 fn render_function_type(

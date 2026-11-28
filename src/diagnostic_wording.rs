@@ -57,6 +57,16 @@ pub fn unresolved_reference(name: &str) -> NamedMessage {
     }
 }
 
+/// `ARGUMENT_TYPE_MISMATCH`: an argument of type `actual` passed where `expected` is declared.
+pub fn argument_type_mismatch(actual: &str, expected: &str) -> NamedMessage {
+    NamedMessage {
+        name: names::ARGUMENT_TYPE_MISMATCH,
+        message: format!(
+            "Argument type mismatch: actual type is '{actual}', but '{expected}' was expected."
+        ),
+    }
+}
+
 /// `UNRESOLVED_IMPORT`: an import path segment that names nothing. kotlinc renders it as it renders
 /// `UNRESOLVED_REFERENCE`.
 pub fn unresolved_import(segment: &str) -> NamedMessage {
