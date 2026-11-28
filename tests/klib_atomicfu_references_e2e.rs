@@ -7,9 +7,11 @@
 //! invocation is a returnable block returning the property reference. One that does not (any
 //! producer before Kotlin 2.4.20, or `-Xklib-ir-inliner=disabled`) leaves each caller calling the
 //! helper, which its metadata does not publish, with the lambda; the intrinsic's receiver is the
-//! lambda's invocation until the call is expanded. The program itself is portable; the JVM oracle
-//! runs it against the atomicfu runtime before the Native consumer runs the dependency's serialized
-//! bodies.
+//! lambda's invocation until the call is expanded. A reference atomic is an `Any?` field whose
+//! reads reach the atomic's declared type without a cast, and a producer without rich callable
+//! references in KLIBs references each field by a plain property reference. The program itself
+//! is portable; the JVM oracle runs it against the atomicfu runtime before the Native consumer
+//! runs the dependency's serialized bodies.
 
 use crate::common;
 use krusty::diag::DiagSink;
@@ -26,6 +28,17 @@ fn dependency_atomicfu_helpers_update_the_field_their_inlined_lambda_references(
 #[test]
 fn dependency_atomicfu_helper_calls_update_the_field_their_lambda_references() {
     atomicfu_consumer_runs(&["-Xklib-ir-inliner=disabled"]);
+}
+
+/// A producer that neither inlines before it serializes nor writes rich callable references, as
+/// a Kotlin 2.2 producer made kotlinx-coroutines' published KLIBs, serializes each field
+/// reference as a plain property reference.
+#[test]
+fn dependency_atomicfu_plain_property_references_update_their_field() {
+    atomicfu_consumer_runs(&[
+        "-Xklib-ir-inliner=disabled",
+        "-XXLanguage:-IrRichCallableReferencesInKlibs",
+    ]);
 }
 
 /// Produce the atomicfu library with `producer_arguments`, then compile and run the consumer

@@ -876,11 +876,11 @@ impl<'a> BodyLowering<'a> {
                 }
                 (self.closure(*invoke, ty, origin.as_deref())?, ty)
             }
-            KlibIrExprKind::RichPropertyReference { .. } => {
+            KlibIrExprKind::RichPropertyReference { .. }
+            | KlibIrExprKind::PropertyReference { .. } => {
                 let ty = self.ty(expression, "property reference")?;
                 return self.field_designation(expression, ty);
             }
-            KlibIrExprKind::PropertyReference { .. } => return unsupported("a property reference"),
             KlibIrExprKind::LocalDelegatedPropertyReference { .. } => {
                 return unsupported("a local delegated property reference")
             }
@@ -1191,6 +1191,9 @@ impl<'a> BodyLowering<'a> {
         if expected.is_ty_param() && expected.ty_param_bound() == Some(actual) {
             let coerced = self.coercion(lowered, expected);
             return Ok(self.typed(coerced, expected));
+        }
+        if let Some(read) = self.atomic_reference_read(lowered, actual, expected) {
+            return Ok(read);
         }
         self.upcast(lowered, actual, expected)
             .ok_or(KlibBodyDeclineReason::ImplicitConversion)
