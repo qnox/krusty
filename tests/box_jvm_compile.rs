@@ -27,6 +27,9 @@ pub(super) enum CompileFailure {
     /// krusty reported errors: their messages, in the order it reported them, and the complete
     /// rendered report of every diagnostic.
     Rejected { errors: Vec<String>, report: String },
+    /// krusty refused the command line the case selects before reading a source: its messages, in
+    /// the order it reported them, as kotlinc's `error: <message>` lines.
+    CommandLineRefused(Vec<String>),
     /// The harness could not set up or finish the compilation: a command line krusty refuses, a
     /// `// MODULE:` shape it cannot split, javac refusing the case's Java, or a scratch write.
     Harness(String),
@@ -209,7 +212,21 @@ pub(super) fn unit_options<'a>(
     case: &str,
     unit: impl IntoIterator<Item = &'a str>,
 ) -> Result<krusty_cli::cli::Options, String> {
-    let configuration = krusty::conformance::unit_compiler_configuration(case, unit)?;
+    command_line(case, unit).map_err(|failure| match failure {
+        CompileFailure::CommandLineRefused(refusals) => refusals.join("\n"),
+        CompileFailure::Harness(reason) => reason,
+        CompileFailure::Rejected { report, .. } => report,
+    })
+}
+
+/// [`unit_options`], telling a command line krusty refuses
+/// ([`CompileFailure::CommandLineRefused`]) from a case the harness cannot configure.
+fn command_line<'a>(
+    case: &str,
+    unit: impl IntoIterator<Item = &'a str>,
+) -> Compiled<krusty_cli::cli::Options> {
+    let configuration =
+        krusty::conformance::unit_compiler_configuration(case, unit).map_err(harness)?;
     let mut options = krusty_cli::cli::parse(configuration.arguments.clone());
     let refusals: Vec<&str> = options
         .argument_errors
@@ -218,7 +235,14 @@ pub(super) fn unit_options<'a>(
         .map(String::as_str)
         .collect();
     if !refusals.is_empty() {
-        return Err(refusals.join("\n"));
+        return Err(CompileFailure::CommandLineRefused(
+            refusals.into_iter().map(str::to_string).collect(),
+        ));
+    }
+    if !options.configuration_errors.is_empty() {
+        return Err(CompileFailure::CommandLineRefused(
+            options.configuration_errors.clone(),
+        ));
     }
     options.inline_scopes_numbers = configuration.inline_scopes_numbers;
     if configuration.language_version.is_some() || configuration.api_version.is_some() {
@@ -233,7 +257,9 @@ pub(super) fn unit_options<'a>(
         });
         // The command line already read the feature settings; only the levels change.
         let feature_settings = options.language_settings.feature_settings();
-        options.override_language_versions(language_version, api_version, &feature_settings)?;
+        options
+            .override_language_versions(language_version, api_version, &feature_settings)
+            .map_err(|refusal| CompileFailure::CommandLineRefused(vec![refusal]))?;
     }
     Ok(options)
 }
@@ -262,6 +288,18 @@ fn jvm_libraries(
         .with_api_version(options.language_settings.api_version)
 }
 
+/// The JDK installation whose bootclasspath root is `modules` (`<home>/lib/modules`), which kotlinc
+/// is told as `-jdk-home` and which `-Xjdk-release` reads `lib/ct.sym` from. A root of another
+/// shape (the mock JDK's `rt.jar`) names no installation.
+pub(super) fn jdk_home_of(modules: &Path) -> Option<&Path> {
+    Some(modules)
+        .filter(|modules| modules.file_name().is_some_and(|name| name == "modules"))
+        .and_then(Path::parent)
+        .filter(|lib| lib.file_name().is_some_and(|name| name == "lib"))
+        .and_then(Path::parent)
+        .filter(|home| home.join("release").is_file())
+}
+
 fn compile_source(
     src: &str,
     stem: &str,
@@ -270,7 +308,11 @@ fn compile_source(
     progress: &dyn Fn(&str),
 ) -> Compiled<Vec<(String, Vec<u8>)>> {
     let mut diags = DiagSink::new();
-    let options = unit_options(src, [src]).map_err(harness)?;
+    let mut options = command_line(src, [src])?;
+    options.jdk_home = jdk_modules.and_then(jdk_home_of).map(Path::to_path_buf);
+    options.check_jdk_release().map_err(|errors| {
+        CompileFailure::CommandLineRefused(errors.iter().map(ToString::to_string).collect())
+    })?;
     // The stdlib is on krusty's classpath only for `// WITH_STDLIB` tests — the caller passes the
     // located jar (or `None`), exactly as a drop-in `kotlinc` user supplies `-classpath`.
     // Explicit classpath: the kotlin-stdlib jar (for `// WITH_STDLIB`) plus the JDK `lib/modules`
@@ -515,7 +557,11 @@ fn compile_blocks_mixed(
         .chain(java_blocks)
         .chain(compiled_java)
         .map(|(_, source)| source.as_str());
-    let mut options = unit_options(case, unit).map_err(harness)?;
+    let mut options = command_line(case, unit)?;
+    options.jdk_home = jdk_modules.and_then(jdk_home_of).map(Path::to_path_buf);
+    options.check_jdk_release().map_err(|errors| {
+        CompileFailure::CommandLineRefused(errors.iter().map(ToString::to_string).collect())
+    })?;
     // A folded `dependsOn` chain is a multiplatform compilation even when the fixture does not
     // repeat the feature as a `// LANGUAGE:` directive. The common/platform source roles already
     // carry that topology into the frontend; enable the matching project feature on the exact

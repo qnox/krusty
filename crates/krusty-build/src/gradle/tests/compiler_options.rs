@@ -336,9 +336,8 @@ pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path) {
         assert_eq!(
             std::fs::read_to_string(refusals_record).expect("refusals record"),
             format!(
-                "krusty rejects the command line\nkrusty: error: unknown {kind} version: 1.9\n\
-                 Supported {kind} versions: 2.0 (deprecated), 2.1 (deprecated), 2.2, 2.3, 2.4, \
-                 2.5 (experimental), 2.6 (experimental)\n"
+                "krusty rejects the command line\nkrusty: error: {kind} version 1.9 is no longer \
+                 supported; use version 2.0 or greater instead.\n"
             ),
             "{case}: {rendered}",
         );
