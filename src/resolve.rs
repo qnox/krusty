@@ -10307,8 +10307,9 @@ impl<'a> Checker<'a> {
                     self.postponed_context_sensitive_name(scope, argument)
                         .is_some()
                 });
-                let toplevel_partial: Option<Vec<Option<Ty>>> = if !self
-                    .lexical_value_declares(scope, &fname)
+                let lexical_value_claims_call =
+                    self.lexical_value_claims_call_with_arguments(scope, &fname, args);
+                let toplevel_partial: Option<Vec<Option<Ty>>> = if !lexical_value_claims_call
                     && (has_lambda_argument
                         || has_callable_ref_argument
                         || has_function_value_argument
@@ -10655,7 +10656,7 @@ impl<'a> Checker<'a> {
                 let top_level_sam = if (has_lambda_argument
                     || has_callable_ref_argument
                     || has_function_value_argument)
-                    && !self.lexical_value_declares(scope, &fname)
+                    && !lexical_value_claims_call
                 {
                     self.top_level_sam_selection(
                         scope,
@@ -10682,7 +10683,7 @@ impl<'a> Checker<'a> {
                     && top_level_functions
                         .top_level()
                         .any(|o| o.flags.inline.can_inline());
-                let toplevel_must_inline = !self.lexical_value_declares(scope, &fname)
+                let toplevel_must_inline = !lexical_value_claims_call
                     && !self.module_declares(&fname)
                     && known_sig.is_none()
                     && args
@@ -10714,10 +10715,8 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
-                let implicit_member_lambda_enabled = !self
-                    .lexical_value_claims_call_with_arguments(scope, &fname, args)
-                    && known_sig.is_none()
-                    && has_lambda_argument;
+                let implicit_member_lambda_enabled =
+                    !lexical_value_claims_call && known_sig.is_none() && has_lambda_argument;
                 let ordinary_this_member_lambda_shape = implicit_member_lambda_enabled
                     .then(|| {
                         self.implicit_source_member_lambda_shape(
@@ -10863,21 +10862,21 @@ impl<'a> Checker<'a> {
                     boxes_captures: selected_lambda_boxes_captures,
                     inline: selected_shape_inline,
                 } = lambda_call_shapes::SelectedLambdaInputs::of(selected_lambda_shape);
-                let constructor_expectations: Option<ConstructionExpectations> = if !self
-                    .lexical_value_declares(scope, &fname)
-                    && self.resolver().top_level_candidates(&fname).is_empty()
-                {
-                    bare_constructor_classifier.and_then(|internal| {
-                        self.construction_argument_expectations(
-                            internal,
-                            args.len(),
-                            arg_names.as_deref(),
-                            self.file.call_has_trailing_lambda.contains(&call.0),
-                        )
-                    })
-                } else {
-                    None
-                };
+                let constructor_expectations: Option<ConstructionExpectations> =
+                    if !lexical_value_claims_call
+                        && self.resolver().top_level_candidates(&fname).is_empty()
+                    {
+                        bare_constructor_classifier.and_then(|internal| {
+                            self.construction_argument_expectations(
+                                internal,
+                                args.len(),
+                                arg_names.as_deref(),
+                                self.file.call_has_trailing_lambda.contains(&call.0),
+                            )
+                        })
+                    } else {
+                        None
+                    };
                 let constructor_result_context_admitted = constructor_expectations
                     .as_ref()
                     .zip(bare_constructor_classifier)
@@ -10892,7 +10891,7 @@ impl<'a> Checker<'a> {
                 // the rule. Ordinary functions and extensions keep their established eager fallback
                 // (notably zero-parameter lambdas whose empty parameter vector is a real shape).
                 let defer_unshaped_constructor_lambdas = has_lambda_argument
-                    && !self.lexical_value_declares(scope, &fname)
+                    && !lexical_value_claims_call
                     && self.resolver().top_level_candidates(&fname).is_empty()
                     && bare_constructor_classifier
                         .and_then(|internal| self.resolved_type_name(internal))
