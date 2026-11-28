@@ -134,6 +134,14 @@ quirks! {
         fixed_in: Some(KotlinVersion::V2_4_20),
         defect: false,
     }
+    /// A context parameter passed on as a context argument is read at the offsets of its
+    /// declaration, so the load marks the line the declaration starts on. Later releases read it
+    /// with no offsets, which marks nothing.
+    ContextParameterLoadMarksDeclarationLine {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: false,
+    }
     /// A repeated anonymous context label is numbered after `#` (`$context-String#1`) instead of
     /// `$` (`$context-String$1`).
     AnonymousContextOrdinalAfterHash {

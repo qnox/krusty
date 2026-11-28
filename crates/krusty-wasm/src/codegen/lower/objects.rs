@@ -476,6 +476,20 @@ impl Body<'_> {
                     Some(*getter)
                 }
             }
+            // A member property declaring context parameters takes them as leading accessor
+            // operands, which dispatches the way a member extension's receiver does.
+            Some(IrLocalPropertyLayout::Member {
+                getter,
+                setter: property_setter,
+                context_parameters,
+                ..
+            }) if !context_parameters.is_empty() => {
+                if setter {
+                    *property_setter
+                } else {
+                    *getter
+                }
+            }
             _ => None,
         }
         .ok_or_else(|| "a member-extension property call with no recorded accessor".to_string())?;
@@ -961,6 +975,12 @@ impl Body<'_> {
                             .dispatch_member_extension_property(
                                 class, *property, false, receiver, args,
                             ),
+                        Some(IrLocalPropertyLayout::Member {
+                            context_parameters, ..
+                        }) if !context_parameters.is_empty() => self
+                            .dispatch_member_extension_property(
+                                class, *property, false, receiver, args,
+                            ),
                         _ if args.is_empty() => self.property_read(None, *property, Some(receiver)),
                         _ => self.context_member_accessor(*property, false, receiver, args),
                     },
@@ -968,6 +988,12 @@ impl Body<'_> {
                         property,
                     )) => match self.ir.local_property_layouts.get(property) {
                         Some(IrLocalPropertyLayout::MemberExtension { .. }) => self
+                            .dispatch_member_extension_property(
+                                class, *property, true, receiver, args,
+                            ),
+                        Some(IrLocalPropertyLayout::Member {
+                            context_parameters, ..
+                        }) if !context_parameters.is_empty() => self
                             .dispatch_member_extension_property(
                                 class, *property, true, receiver, args,
                             ),

@@ -807,6 +807,23 @@ fn property_bridges(
         let declared_receiver = edge.declared_receiver.map(bridge_erasure);
         let implementation_receiver = edge.implementation_receiver.map(bridge_erasure);
         let getter_results = PropertyGetterResults::of(ir, callables, &edge, override_results)?;
+        // An accessor of a property with context parameters takes them before its value, so the
+        // accessor bridges below, which take the value alone, cannot stand in for it. Where the
+        // override and the declaration agree on every erased type, the override's own accessors
+        // already have the declaration's descriptors and nothing bridges.
+        if has_context_parameters(ir, edge.implementation)
+            && krusty::jvm::names::same_type_descriptor(
+                getter_results.declared,
+                getter_results.implementation,
+            )
+            && !value_class_result_difference(
+                ir,
+                getter_results.declared,
+                getter_results.implementation,
+            )
+        {
+            continue;
+        }
         // As for a function: `Z` over `Z?` shares a descriptor before value classes are erased,
         // but each getter is named by its own value-class result (`getP-<hash>()I` beside the
         // supertype's `getP-<other hash>()LZ;`), so the supertype's getter needs its bridge.
@@ -912,6 +929,21 @@ fn value_class_result_difference(ir: &IrFile, declared: Ty, implementation: Ty) 
                 .obj_internal()
                 .is_some_and(|name| crate::value_classes::is_boxed_value_class(ir, name))
         })
+}
+
+/// Whether the module property `target` declares context parameters.
+fn has_context_parameters(
+    ir: &IrFile,
+    target: krusty::fir::ResolvedPropertyOverrideTarget,
+) -> bool {
+    match target {
+        krusty::fir::ResolvedPropertyOverrideTarget::Module(property) => matches!(
+            ir.local_property_layouts.get(&property),
+            Some(krusty::ir::IrLocalPropertyLayout::Member { context_parameters, .. })
+                if !context_parameters.is_empty()
+        ),
+        krusty::fir::ResolvedPropertyOverrideTarget::External(_) => false,
+    }
 }
 
 /// A member-extension property's accessors are ordinary methods taking the receiver

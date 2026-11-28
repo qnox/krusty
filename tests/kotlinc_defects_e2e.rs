@@ -223,6 +223,7 @@ fn defect(quirk: Quirk) -> Option<Defect> {
         | Quirk::SuspendUnitTailCallKeepsCalleeResult
         | Quirk::AnonymousContextParameterIsNotLocal
         | Quirk::AnonymousContextOrdinalAfterHash
+        | Quirk::ContextParameterLoadMarksDeclarationLine
         | Quirk::SyntheticClassXiOmitsVisibility
         | Quirk::AnnotationImplCarriesNullability
         | Quirk::KlibLegacyMetadataVersionBelowLanguage23

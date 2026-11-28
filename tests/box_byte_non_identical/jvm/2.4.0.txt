@@ -378,7 +378,6 @@ contextParameters/classMemberAndTopLevelWithContext.kt
 contextParameters/companionObjectInContext.kt
 contextParameters/contextFunInSam.kt
 contextParameters/contextOnInvokeResolve.kt
-contextParameters/contextResolveDependingOnCallSite.kt
 contextParameters/contextualAnonymousFunAsAnExpression.kt
 contextParameters/explicitPassing.kt
 contextParameters/functionalType.kt
@@ -2084,7 +2083,6 @@ reflection/types/typeArguments.kt
 reflection/types/useSiteVariance.kt
 regressions/CapturedContextDelegate.kt
 regressions/ContextCaptureLocalClasses.kt
-regressions/EscapedNamedContext.kt
 regressions/FunctionArgumentParameterVariance.kt
 regressions/FunctionValueInapplicableTypesYieldsToReceiverMember.kt
 regressions/FunctionValueWrongArityYieldsToReceiverMember.kt
@@ -2227,7 +2225,6 @@ regressions/multimodule/dependencyInterfaceAppliedAbi.kt
 regressions/multimodule/dependencyMapErasedKeyBarrier.kt
 regressions/multimodule/dependencyMemberContractInitialization.kt
 regressions/multimodule/distinctScalarBackingFieldExport.kt
-regressions/multimodule/inferredResultThroughContextAliasArguments.kt
 regressions/multimodule/inlineLambdaSuspendCompletion.kt
 regressions/multimodule/inlineNarrowElementInRange.kt
 regressions/multimodule/inlineStdlibContextUnitBlock.kt
