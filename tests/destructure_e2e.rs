@@ -151,7 +151,7 @@ fn destructured_lambda_against_multi_arity_function_type_is_rejected() {
     );
     assert!(
         msgs.iter().any(|m| m.contains(
-            "initializer type mismatch: expected '(Int, Int) -> Unit', actual '(Int) -> Unit'"
+            "Initializer type mismatch: expected '(Int, Int) -> Unit', actual '(Int) -> Unit'"
         )),
         "msgs: {msgs:?}"
     );
@@ -168,7 +168,7 @@ fn lambda_declaring_more_parameters_than_the_expected_shape_is_rejected() {
     );
     assert!(
         msgs.iter()
-            .any(|m| m.contains("initializer type mismatch: expected '(Int) -> Unit'")),
+            .any(|m| m.contains("Initializer type mismatch: expected '(Int) -> Unit'")),
         "msgs: {msgs:?}"
     );
 }

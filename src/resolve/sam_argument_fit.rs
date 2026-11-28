@@ -127,8 +127,8 @@ impl Checker<'_> {
         else {
             return false;
         };
-        if let Some(message) = self.assignability_error_message(sam_function, actual, "argument") {
-            self.diags.error(self.span(argument), message);
+        if let Some(report) = self.argument_mismatch_message(sam_function, actual) {
+            self.diags.report_error(self.span(argument), report);
         }
         true
     }

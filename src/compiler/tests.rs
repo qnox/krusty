@@ -1320,7 +1320,7 @@ fn compiler_does_not_lower_after_frontend_error() {
 
     assert_eq!(
         emitted_diagnostics(&diags),
-        [(0, "return type mismatch: expected 'Int', actual 'String'.")]
+        [(0, "Return type mismatch: expected 'Int', actual 'String'.")]
     );
     assert!(outputs.is_empty());
 }

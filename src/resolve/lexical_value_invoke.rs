@@ -365,11 +365,7 @@ impl Checker<'_> {
                         .rejected_argument_reason(mismatch)
                         .expect("an assessed type mismatch has a diagnostic reason");
                     message.push_str("\n  ");
-                    let mut chars = reason.chars();
-                    if let Some(first) = chars.next() {
-                        message.extend(first.to_uppercase());
-                    }
-                    message.extend(chars);
+                    message.push_str(&reason.message);
                 }
             }
             self.diags.error(span, message);
@@ -513,7 +509,7 @@ impl Checker<'_> {
     fn rejected_argument_reason(
         &self,
         mismatch: &constructor_arguments::ConstructorArgumentMismatch,
-    ) -> Option<String> {
+    ) -> Option<crate::diag::NamedMessage> {
         if mismatch.actual == Ty::Error
             || mismatch.expected == Ty::Error
             || mismatch.actual.mentions_pending()
@@ -521,10 +517,9 @@ impl Checker<'_> {
         {
             return None;
         }
-        self.assignability_error_message(
+        self.argument_mismatch_message(
             mismatch.expected,
             self.suspend_converted_argument(mismatch.expected, mismatch.actual),
-            "argument",
         )
     }
 

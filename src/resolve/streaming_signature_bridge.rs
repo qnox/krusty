@@ -582,8 +582,7 @@ impl ProductionSignatureSemantics<'_> {
         spelling: &str,
     ) -> crate::fir::DiagnosticId {
         let report = crate::diagnostic_wording::unresolved_reference(spelling);
-        let (message, name) = (report.message, Some(report.name));
-        self.record_source_finding_at(declaration, (source.raw(), span), message, name, None)
+        self.record_source_finding_at(declaration, (source.raw(), span), report.into(), None)
     }
 
     fn record_top_level_context_call_failure(
@@ -743,10 +742,9 @@ impl ProductionSignatureSemantics<'_> {
                     return Some(self.record_source_diagnostic(
                         scope.owner,
                         argument_origin,
-                        format!(
-                            "argument type mismatch: actual type is '{}', but '{}' was expected.",
-                            actual.source_name(),
-                            expected.source_name(),
+                        crate::diagnostic_wording::argument_type_mismatch(
+                            &actual.source_name(),
+                            &expected.source_name(),
                         ),
                     ));
                 }
@@ -780,7 +778,7 @@ impl ProductionSignatureSemantics<'_> {
         span: Span,
         message: String,
     ) -> crate::fir::DiagnosticId {
-        self.record_source_finding_at(declaration, (source.raw(), span), message, None, None)
+        self.record_source_finding_at(declaration, (source.raw(), span), message.into(), None)
     }
 
     /// A finding reported on every exit, once per `identity`.

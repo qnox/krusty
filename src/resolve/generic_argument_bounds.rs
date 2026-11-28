@@ -153,7 +153,7 @@ impl Checker<'_> {
                     );
                     return true;
                 }
-                let span = parameters
+                let (span, ctx) = parameters
                     .and_then(|parameters| {
                         parameters
                             .iter()
@@ -164,11 +164,11 @@ impl Checker<'_> {
                                     .get(parameter + context_count)
                                     .and_then(|parameter| parameter.non_null().ty_param_name())
                                     .is_some_and(|name| name == formal)
-                                    .then(|| self.span(args[source]))
+                                    .then(|| (self.span(args[source]), "bound argument"))
                             })
                     })
-                    .unwrap_or_else(|| self.span(call));
-                self.expect_assignable(expected, actual, span, "type argument");
+                    .unwrap_or_else(|| (self.span(call), "type argument"));
+                self.expect_assignable(expected, actual, span, ctx);
             }
         }
         false
