@@ -106,11 +106,11 @@ pub(super) fn operation(
                 }));
             }
             let value = ir.add_arithmetic(op, lhs, rhs, arithmetic(result));
-            Some(BuiltinMemberOperation::Value(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: value,
-                type_operand: result,
-            }))
+            Some(BuiltinMemberOperation::Value(IrExpr::type_op(
+                IrTypeOp::ImplicitCoercion,
+                value,
+                result,
+            )))
         }
         _ => None,
     }
@@ -130,19 +130,11 @@ fn unary_operation(
         }
         CompilerIntrinsic::NumericConversion => {
             let operand = coerce(ir, receiver, receiver_ty, receiver_ty);
-            Some(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: operand,
-                type_operand: result,
-            })
+            Some(IrExpr::type_op(IrTypeOp::ImplicitCoercion, operand, result))
         }
         CompilerIntrinsic::PrimitiveUnary(PrimitiveUnaryIntrinsic::Identity) => {
             let operand = coerce(ir, receiver, receiver_ty, receiver_ty);
-            Some(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: operand,
-                type_operand: result,
-            })
+            Some(IrExpr::type_op(IrTypeOp::ImplicitCoercion, operand, result))
         }
         CompilerIntrinsic::PrimitiveUnary(PrimitiveUnaryIntrinsic::Negate) => {
             let operand = coerce(ir, receiver, receiver_ty, result);
@@ -180,19 +172,15 @@ fn unary_operation(
 /// adapter may receive the value boxed (an erased generic `(acc: S, T) -> S` parameter or a platform
 /// `Int!`), and a box must be unwrapped as its own type before it is widened (`Integer` to `long`).
 fn coerce(ir: &mut IrFile, value: ExprId, semantic: Ty, carrier: Ty) -> ExprId {
-    let unboxed = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::ImplicitCoercion,
-        arg: value,
-        type_operand: semantic,
-    });
+    let unboxed = ir.add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, value, semantic));
     if semantic == carrier {
         return unboxed;
     }
-    ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::ImplicitCoercion,
-        arg: unboxed,
-        type_operand: carrier,
-    })
+    ir.add_expr(IrExpr::type_op(
+        IrTypeOp::ImplicitCoercion,
+        unboxed,
+        carrier,
+    ))
 }
 
 #[cfg(test)]
@@ -225,6 +213,7 @@ mod tests {
             op: IrTypeOp::ImplicitCoercion,
             arg,
             type_operand: Ty::Boolean,
+            ..
         } = ir.expr(operand)
         else {
             panic!("the negation's operand is the receiver as a `Boolean`");

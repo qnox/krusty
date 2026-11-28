@@ -167,6 +167,7 @@ impl Emitter<'_> {
                 op: to @ (IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf),
                 arg,
                 type_operand,
+                ..
             } if !type_operand.is_nullable() => Some((*to, *arg, *type_operand)),
             _ => None,
         };

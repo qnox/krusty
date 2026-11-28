@@ -235,11 +235,11 @@ impl IrFile {
         } else if selected_result == reference_result {
             value
         } else {
-            self.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: value,
-                type_operand: reference_result,
-            })
+            self.add_expr(IrExpr::type_op(
+                IrTypeOp::ImplicitCoercion,
+                value,
+                reference_result,
+            ))
         };
         statements.push(self.add_expr(IrExpr::Return(Some(result))));
         let body = self.add_expr(IrExpr::Block {

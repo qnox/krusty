@@ -513,11 +513,11 @@ pub(super) fn complete(
         // type is `Foo$serializer`, and kotlinc narrows at the return with a `checkcast` to
         // the interface. The JVM would verify the method without it — which is why this was
         // invisible to every round-trip test — but the bytes differ from kotlinc's.
-        let inst = ir.add_expr(IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::Cast,
-            arg: inst,
-            type_operand: kserializer_of(serialized_ty),
-        });
+        let inst = ir.add_expr(IrExpr::type_op(
+            crate::ir::IrTypeOp::Cast,
+            inst,
+            kserializer_of(serialized_ty),
+        ));
         let inst_ret = ir.add_expr(IrExpr::Return(Some(inst)));
         ir.add_expr(IrExpr::Block {
             stmts: vec![inst_ret],

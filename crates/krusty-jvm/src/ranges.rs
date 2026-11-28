@@ -104,11 +104,7 @@ pub(super) fn realize(
         } else {
             let physical = ir.add_expr(physical);
             copy_expression_facts(ir, expression as ExprId, physical);
-            ir.exprs[expression] = IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: physical,
-                type_operand: result,
-            };
+            ir.exprs[expression] = IrExpr::type_op(IrTypeOp::ImplicitCoercion, physical, result);
             physical
         };
         // The helper is a Kotlin declaration (`infix fun Int.until(to: Int)`): its parameters are
@@ -264,11 +260,7 @@ fn coerce(ir: &mut IrFile, cause: ExprId, value: ExprId, source: Ty, target: Ty)
     if source == target {
         return value;
     }
-    let value = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::ImplicitCoercion,
-        arg: value,
-        type_operand: target,
-    });
+    let value = ir.add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, value, target));
     copy_expression_facts(ir, cause, value);
     value
 }

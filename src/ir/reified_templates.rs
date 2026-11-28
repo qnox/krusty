@@ -201,11 +201,11 @@ mod tests {
         ir.callable_reference_enclosures
             .insert(node, IrEnclosure::Function(declaration));
         let operand = ir.add_expr(IrExpr::GetValue(0));
-        let operation = ir.add_expr(IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::InstanceOf,
-            arg: operand,
-            type_operand: parameter().ty(),
-        });
+        let operation = ir.add_expr(IrExpr::type_op(
+            crate::ir::IrTypeOp::InstanceOf,
+            operand,
+            parameter().ty(),
+        ));
         (ir, lambda, node, operation)
     }
 

@@ -110,11 +110,11 @@ fn instance(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &ComposableLambda
         None,
         vec![key, tracked, lambda.lambda],
     );
-    ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::ImplicitCoercion,
-        arg: created,
-        type_operand: runtime::composable_function(&lambda.parameter_types()),
-    })
+    ir.add_expr(IrExpr::type_op(
+        IrTypeOp::ImplicitCoercion,
+        created,
+        runtime::composable_function(&lambda.parameter_types()),
+    ))
 }
 
 /// The `internal val` holding one singleton.

@@ -1979,6 +1979,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 op,
                 arg,
                 type_operand,
+                erased,
             } => {
                 if matches!(
                     op,
@@ -2000,6 +2001,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         op,
                         arg,
                         type_operand,
+                        erased,
                         self.file.ir.declaration_result_coercions.contains(&id),
                     )
                 }

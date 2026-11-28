@@ -66,6 +66,7 @@ pub(super) fn realize(ir: &mut IrFile, underlying: &Under) {
                 op: IrTypeOp::ImplicitCoercion,
                 arg,
                 type_operand,
+                ..
             } => Some((*arg, *type_operand)),
             _ => None,
         })

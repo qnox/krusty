@@ -1472,6 +1472,7 @@ fn is_constant(ir: &IrFile, expression: ExprId) -> bool {
             op: crate::ir::IrTypeOp::ImplicitCoercion,
             arg,
             type_operand,
+            ..
         } => {
             type_operand.is_reference()
                 && matches!(

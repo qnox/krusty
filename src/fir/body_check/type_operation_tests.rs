@@ -127,7 +127,7 @@ fn bare_generic_typealias_runtime_operands_are_checked_as_star_expansions() {
         operations.as_slice(),
         [
             (FirTypeOperation::NotIs(_), first_target, Ty::Boolean),
-            (FirTypeOperation::Cast, second_target, result),
+            (FirTypeOperation::Cast(_), second_target, result),
         ] if *first_target == target && *second_target == target && *result == target
     ));
 }
@@ -153,5 +153,64 @@ fn bare_generic_typealias_type_test_recovers_arguments_from_the_subject_supertyp
             .ty
             .get(),
         Ty::Nothing,
+    );
+}
+
+/// The cast plans of every `as` in `source`'s `test` body, in expression order.
+fn cast_plans(source: &str) -> Vec<(crate::fir::FirCastPlan, Ty)> {
+    let (body, _) = checked_function_body(source, "test");
+    (0..body.expression_count())
+        .filter_map(|raw| body.expr(FirExprId::from_raw(raw as u32)))
+        .filter_map(|expression| match &expression.kind {
+            FirExprKind::TypeOperation {
+                operation: FirTypeOperation::Cast(plan),
+                target,
+                ..
+            } => Some((*plan, target.get())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_cast_to_a_type_parameter_records_the_erasure_it_checks() {
+    let plans = cast_plans(
+        "open class C\n\
+         interface I\n\
+         fun <R : C> test(value: Any?): R where R : I { return value as R }\n",
+    );
+    let [(plan, target)] = plans.as_slice() else {
+        panic!("one cast expected, got {plans:?}");
+    };
+    assert!(target.is_ty_param());
+    assert_eq!(plan.erased, Some(Ty::obj("C")));
+}
+
+#[test]
+fn a_cast_to_a_type_parameter_erases_through_a_nested_bound() {
+    let plans = cast_plans(
+        "open class C\n\
+         fun <U : C, R : U> test(value: Any?): R { return value as R }\n",
+    );
+    let [(plan, _)] = plans.as_slice() else {
+        panic!("one cast expected, got {plans:?}");
+    };
+    assert_eq!(plan.erased, Some(Ty::obj("C")));
+}
+
+#[test]
+fn a_cast_to_an_unbounded_parameter_or_a_class_records_no_erasure() {
+    let plans = cast_plans(
+        "fun <T> test(value: Any?, other: Any?): String {\n\
+             val unbounded = value as T\n\
+             return other as String\n\
+         }\n",
+    );
+    assert_eq!(
+        plans
+            .iter()
+            .map(|(plan, _)| plan.erased)
+            .collect::<Vec<_>>(),
+        vec![None, None]
     );
 }

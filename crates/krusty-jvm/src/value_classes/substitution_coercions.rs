@@ -244,11 +244,11 @@ mod tests {
 
     fn coercion(ir: &mut IrFile) -> (ExprId, ExprId) {
         let argument = ir.add_expr(IrExpr::GetValue(0));
-        let coercion = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: argument,
-            type_operand: Ty::nullable(Ty::obj("kotlin/Any")),
-        });
+        let coercion = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            argument,
+            Ty::nullable(Ty::obj("kotlin/Any")),
+        ));
         (argument, coercion)
     }
 
@@ -301,16 +301,16 @@ mod tests {
     fn shared_unbox_is_kept_when_another_use_does_not_rebox() {
         let mut ir = IrFile::default();
         let argument = ir.add_expr(IrExpr::GetValue(0));
-        let round_trip = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: argument,
-            type_operand: Ty::obj("fixture/Value"),
-        });
-        let retained = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: argument,
-            type_operand: Ty::obj("fixture/OtherValue"),
-        });
+        let round_trip = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            argument,
+            Ty::obj("fixture/Value"),
+        ));
+        let retained = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            argument,
+            Ty::obj("fixture/OtherValue"),
+        ));
         let value_class = type_name("fixture/Value");
         let box_op = BoxOp::Box(value_class);
         let unbox_op = BoxOp::Unbox(value_class);
@@ -335,16 +335,16 @@ mod tests {
     fn every_discarded_coercion_sharing_an_operand_loses_its_unbox() {
         let mut ir = IrFile::default();
         let argument = ir.add_expr(IrExpr::GetValue(0));
-        let first = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: argument,
-            type_operand: Ty::obj("fixture/Value"),
-        });
-        let second = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: argument,
-            type_operand: Ty::obj("fixture/Value"),
-        });
+        let first = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            argument,
+            Ty::obj("fixture/Value"),
+        ));
+        let second = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            argument,
+            Ty::obj("fixture/Value"),
+        ));
         let nested_block = ir.add_expr(IrExpr::Block {
             stmts: vec![],
             value: Some(first),
@@ -374,11 +374,11 @@ mod tests {
     fn a_discarded_read_of_a_carrier_handover_keeps_its_coercion() {
         let mut ir = IrFile::default();
         let call = ir.add_expr(IrExpr::GetValue(0));
-        let coercion = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: call,
-            type_operand: Ty::obj("kotlin/String"),
-        });
+        let coercion = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            call,
+            Ty::obj("kotlin/String"),
+        ));
         ir.add_expr(IrExpr::Block {
             stmts: vec![coercion],
             value: None,
@@ -408,16 +408,16 @@ mod tests {
     fn retained_coercion_use_keeps_a_shared_operands_unbox() {
         let mut ir = IrFile::default();
         let argument = ir.add_expr(IrExpr::GetValue(0));
-        let discarded = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: argument,
-            type_operand: Ty::obj("fixture/Value"),
-        });
-        let retained = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: argument,
-            type_operand: Ty::obj("fixture/Value"),
-        });
+        let discarded = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            argument,
+            Ty::obj("fixture/Value"),
+        ));
+        let retained = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            argument,
+            Ty::obj("fixture/Value"),
+        ));
         ir.add_expr(IrExpr::Block {
             stmts: vec![discarded],
             value: Some(retained),
@@ -444,11 +444,11 @@ mod tests {
     fn coercion_shared_by_discarded_and_retained_blocks_is_not_discarded() {
         let mut ir = IrFile::default();
         let argument = ir.add_expr(IrExpr::GetValue(0));
-        let coercion = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: argument,
-            type_operand: Ty::obj("fixture/Value"),
-        });
+        let coercion = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            argument,
+            Ty::obj("fixture/Value"),
+        ));
         ir.add_expr(IrExpr::Block {
             stmts: vec![coercion],
             value: None,
@@ -481,11 +481,11 @@ mod tests {
             stmts: vec![],
             value: Some(value),
         });
-        let coercion = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: nested,
-            type_operand: Ty::obj("fixture/Value"),
-        });
+        let coercion = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            nested,
+            Ty::obj("fixture/Value"),
+        ));
         ir.add_expr(IrExpr::Block {
             stmts: vec![nested, coercion],
             value: None,
@@ -518,11 +518,11 @@ mod tests {
             stmts: vec![],
             value: Some(value),
         });
-        let coercion = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: nested,
-            type_operand: Ty::obj("fixture/Value"),
-        });
+        let coercion = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            nested,
+            Ty::obj("fixture/Value"),
+        ));
         ir.add_expr(IrExpr::Block {
             stmts: vec![nested, coercion],
             value: None,
@@ -562,11 +562,11 @@ mod tests {
     fn enum_entry_arguments_keep_a_node_shared_with_discarded_code() {
         let mut ir = IrFile::default();
         let argument = ir.add_expr(IrExpr::GetValue(0));
-        let coercion = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: argument,
-            type_operand: Ty::obj("fixture/Value"),
-        });
+        let coercion = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            argument,
+            Ty::obj("fixture/Value"),
+        ));
         ir.add_expr(IrExpr::Block {
             stmts: vec![coercion],
             value: None,

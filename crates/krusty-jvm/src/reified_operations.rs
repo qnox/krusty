@@ -441,6 +441,7 @@ fn realize_expression_dag(
                 op,
                 arg,
                 type_operand,
+                ..
             } => parameter(type_operand, parameters).and_then(|parameter| {
                 let (cast, negated) = match op {
                     IrTypeOp::InstanceOf => (false, false),
@@ -980,11 +981,11 @@ mod tests {
         function(&mut ir, unit, outer_identity);
 
         let own_operand = ir.add_expr(IrExpr::GetValue(0));
-        let own_marker = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::InstanceOf,
-            arg: own_operand,
-            type_operand: Ty::ty_param(own_identity, Ty::obj("kotlin/Any")),
-        });
+        let own_marker = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::InstanceOf,
+            own_operand,
+            Ty::ty_param(own_identity, Ty::obj("kotlin/Any")),
+        ));
         let own_class = krusty::types::type_name("OwnMarker$1");
         let mut own_declaration = krusty::ir::IrClass::synthetic(own_class);
         own_declaration.enclosure = Some(IrEnclosure::Function(0));
@@ -1002,11 +1003,11 @@ mod tests {
         ir.signatures.insert(1, reified_signature(own_identity));
 
         let outer_operand = ir.add_expr(IrExpr::GetValue(0));
-        let outer_marker = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::InstanceOf,
-            arg: outer_operand,
-            type_operand: Ty::ty_param(outer_identity, Ty::obj("kotlin/Any")),
-        });
+        let outer_marker = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::InstanceOf,
+            outer_operand,
+            Ty::ty_param(outer_identity, Ty::obj("kotlin/Any")),
+        ));
         let mixed_class = krusty::types::type_name("OuterMarker$1");
         let mut mixed_declaration = krusty::ir::IrClass::synthetic(mixed_class);
         mixed_declaration.enclosure = Some(IrEnclosure::Function(0));
@@ -1095,11 +1096,11 @@ mod tests {
         let identity = "T@useT";
         let mut ir = IrFile::default();
         let operand = ir.add_expr(IrExpr::GetValue(0));
-        let body = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::InstanceOf,
-            arg: operand,
-            type_operand: Ty::ty_param(identity, Ty::obj("kotlin/Any")),
-        });
+        let body = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::InstanceOf,
+            operand,
+            Ty::ty_param(identity, Ty::obj("kotlin/Any")),
+        ));
         function(&mut ir, body, identity);
 
         realize(&mut ir, &Default::default());
@@ -1123,26 +1124,22 @@ mod tests {
         let declaration = ir.add_expr(IrExpr::UnitInstance);
         function(&mut ir, declaration, identity);
         let argument = ir.add_expr(IrExpr::GetValue(0));
-        let source = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: argument,
-            type_operand: Ty::ty_param(identity, Ty::obj("kotlin/Any")),
-        });
-        let concrete_copy = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: argument,
-            type_operand: Ty::String,
-        });
-        let ordinary = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: argument,
-            type_operand: Ty::ty_param("T@ordinary", Ty::obj("kotlin/Any")),
-        });
-        let erased_object_member = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: argument,
-            type_operand: Ty::ty_param(identity, Ty::obj("kotlin/Any")),
-        });
+        let source = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::Cast,
+            argument,
+            Ty::ty_param(identity, Ty::obj("kotlin/Any")),
+        ));
+        let concrete_copy = ir.add_expr(IrExpr::type_op(IrTypeOp::Cast, argument, Ty::String));
+        let ordinary = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::Cast,
+            argument,
+            Ty::ty_param("T@ordinary", Ty::obj("kotlin/Any")),
+        ));
+        let erased_object_member = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::Cast,
+            argument,
+            Ty::ty_param(identity, Ty::obj("kotlin/Any")),
+        ));
         for body in [source, concrete_copy, ordinary, erased_object_member] {
             let mut implementation = ir.functions[0].clone();
             implementation.name = "invoke".to_owned();
@@ -1325,11 +1322,11 @@ mod tests {
         let mut ir = IrFile::default();
         let body = ir.add_expr(IrExpr::UnitInstance);
         let operand = ir.add_expr(IrExpr::GetValue(0));
-        let type_operation = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: operand,
-            type_operand: Ty::ty_param(identity, Ty::obj("kotlin/Throwable")),
-        });
+        let type_operation = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::Cast,
+            operand,
+            Ty::ty_param(identity, Ty::obj("kotlin/Throwable")),
+        ));
         let class_literal = ir.add_expr(IrExpr::KClassLiteral {
             classifier: Some(Ty::ty_param(identity, Ty::obj("kotlin/Throwable"))),
             value: None,

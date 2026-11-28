@@ -64,11 +64,13 @@ impl BodyLowering<'_> {
             // Checked FIR lowering first gives a `Unit` operand a value of its own.
             return unsupported("a type operator on a `Unit` value");
         }
-        let lowered = self.ir.add_expr(IrExpr::TypeOp {
-            op,
-            arg,
-            type_operand: target,
-        });
+        let lowered = self.ir.add_expr(
+            IrExpr::type_op(op, arg, target).with_erased(
+                (op != IrTypeOp::InstanceOf && op != IrTypeOp::NotInstanceOf)
+                    .then(|| target.cast_erasure())
+                    .flatten(),
+            ),
+        );
         if operator == KlibIrTypeOperator::Cast {
             self.ir.written_casts.insert(lowered);
         }
@@ -130,7 +132,9 @@ impl BodyLowering<'_> {
         let locals = &mut self.locals;
         let cast = self
             .ir
-            .safe_cast(arg, actual, target, || locals.anonymous_slot());
+            .safe_cast(arg, actual, target, target.cast_erasure(), || {
+                locals.anonymous_slot()
+            });
         Ok(self.typed(cast, ty))
     }
 
@@ -186,11 +190,7 @@ impl BodyLowering<'_> {
                 .retyped_supertype_arguments(arg, actual, target)
                 .ok_or(KlibBodyDeclineReason::ImplicitConversion);
         };
-        let cast = self.ir.add_expr(IrExpr::TypeOp {
-            op,
-            arg,
-            type_operand: target,
-        });
+        let cast = self.ir.add_expr(IrExpr::type_op(op, arg, target));
         Ok(self.typed(cast, ty))
     }
 }

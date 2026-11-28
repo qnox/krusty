@@ -132,11 +132,11 @@ pub(super) fn realize(
         } else {
             let construction = ir.add_expr(construction);
             ir.set_logical_type(construction, Ty::obj_name(wrapper));
-            ir.exprs[node as usize] = IrExpr::TypeOp {
-                op: krusty::ir::IrTypeOp::Cast,
-                arg: construction,
-                type_operand: Ty::obj_name(target.classifier),
-            };
+            ir.exprs[node as usize] = IrExpr::type_op(
+                krusty::ir::IrTypeOp::Cast,
+                construction,
+                Ty::obj_name(target.classifier),
+            );
             ir.set_logical_type(node, Ty::obj_name(target.classifier));
             construction
         };

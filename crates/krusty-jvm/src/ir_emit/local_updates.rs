@@ -27,6 +27,7 @@ fn iinc_delta_of(ir: &IrFile, value: u32, var: u32) -> Option<i8> {
             op: IrTypeOp::ImplicitCoercion,
             arg,
             type_operand: Ty::Int,
+            ..
         } => arg,
         _ => value,
     };

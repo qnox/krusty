@@ -222,6 +222,7 @@ impl Emitter<'_> {
                     op: IrTypeOp::ImplicitCoercion,
                     arg,
                     type_operand,
+                    ..
                 } if super::ir_ty_to_jvm(type_operand).is_reference()
                     || self.transformed_result(*arg).is_some() =>
                 {

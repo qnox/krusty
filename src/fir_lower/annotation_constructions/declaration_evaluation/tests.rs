@@ -343,11 +343,7 @@ fn nested_spreads_and_coercions_keep_unsigned_identity_and_element_order() {
     ir.call_operand_bindings.insert(binding);
     ir.argument_evaluation_bindings.insert(binding);
     let read = ir.add_expr(IrExpr::GetValue(0));
-    let conversion = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::ImplicitCoercion,
-        arg: read,
-        type_operand: Ty::UInt,
-    });
+    let conversion = ir.add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, read, Ty::UInt));
     let inner = ir.add_expr(IrExpr::Vararg {
         array_type: array_ty,
         elements: vec![conversion],

@@ -339,11 +339,7 @@ fn pass_continuations(ir: &mut IrFile, suspend_set: &HashSet<u32>) {
             _ => continue,
         };
         ir.call_declared_ret.insert(call, suspended);
-        ir.exprs[site as usize] = IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: call,
-            type_operand: logical,
-        };
+        ir.exprs[site as usize] = IrExpr::type_op(IrTypeOp::ImplicitCoercion, call, logical);
     }
 }
 
@@ -428,11 +424,11 @@ fn completed_value(ir: &mut IrFile, value: Option<ExprId>, unit: bool) -> ExprId
         };
     }
     let value = value.expect("a non-Unit completion has a value");
-    ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::ImplicitCoercion,
-        arg: value,
-        type_operand: Ty::nullable(Ty::obj_name(wk::any())),
-    })
+    ir.add_expr(IrExpr::type_op(
+        IrTypeOp::ImplicitCoercion,
+        value,
+        Ty::nullable(Ty::obj_name(wk::any())),
+    ))
 }
 
 /// Coerce the value of every `return` this body owns to `Any?`. A lambda's implementation is its

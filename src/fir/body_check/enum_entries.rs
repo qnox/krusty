@@ -82,7 +82,7 @@ impl BodyFirChecker<'_> {
             })
         };
         Ok(FirExprKind::TypeOperation {
-            operation: FirTypeOperation::Cast,
+            operation: FirTypeOperation::Cast(Default::default()),
             operand: receiver,
             target: ty,
         })

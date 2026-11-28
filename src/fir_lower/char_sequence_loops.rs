@@ -64,10 +64,8 @@ impl BodyLowering<'_> {
         if receiver_ty == char_sequence {
             return Ok(read);
         }
-        Ok(self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: read,
-            type_operand: char_sequence,
-        }))
+        Ok(self
+            .ir
+            .add_expr(IrExpr::type_op(IrTypeOp::Cast, read, char_sequence)))
     }
 }

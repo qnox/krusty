@@ -395,6 +395,7 @@ impl SelectsExternalMembers for ExprLowering {
             Self::ConstructorCaptures(_)
             | Self::BuiltinUnaryCall { .. }
             | Self::RuntimeTypeTest { .. }
+            | Self::RuntimeCast { .. }
             | Self::ExtensionFunctionBinding { .. }
             | Self::ClassStorageRead(_)
             | Self::EnumEntryStorageRead { .. }

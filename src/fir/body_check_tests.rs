@@ -2040,7 +2040,7 @@ fn statically_proven_suspend_function_tests_and_casts_build_checked_fir() {
                 assert!(matches!(
                     body.expr(*callee).map(|expression| &expression.kind),
                     Some(FirExprKind::TypeOperation {
-                        operation: FirTypeOperation::Cast,
+                        operation: FirTypeOperation::Cast(_),
                         target,
                         ..
                     }) if matches!(target.get().kind(), crate::types::TyKind::Fun(signature) if signature.suspend)

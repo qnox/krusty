@@ -8,11 +8,7 @@ fn immutable_binding_read_survives_clone_and_inline_rehome() {
     let read = ir.add_expr(IrExpr::GetValue(0));
     ir.binding_read_stability
         .insert(read, IrBindingStability::Stable);
-    let cast = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::CastNonNull,
-        arg: read,
-        type_operand: Ty::String,
-    });
+    let cast = ir.add_expr(IrExpr::type_op(IrTypeOp::CastNonNull, read, Ty::String));
 
     let (copy, identities) = crate::ir::clone_expression_dag(&mut ir, cast);
     let copied_read = identities[&read];

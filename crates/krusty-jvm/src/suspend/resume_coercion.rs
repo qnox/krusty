@@ -15,11 +15,7 @@ pub(super) fn unbox(ir: &mut IrFile, value: ExprId, target: &Ty) -> ExprId {
     } else {
         IrTypeOp::ImplicitCoercion
     };
-    ir.add_expr(IrExpr::TypeOp {
-        op,
-        arg: value,
-        type_operand: *target,
-    })
+    ir.add_expr(IrExpr::type_op(op, value, *target))
 }
 
 /// Whether narrowing an erased `Object` resume value to `t` needs an explicit `checkcast` — a concrete

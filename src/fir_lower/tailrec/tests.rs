@@ -123,11 +123,11 @@ fn a_self_call_under_a_coercion_replaces_its_return() {
         dispatch_receiver: None,
         args: vec![argument],
     });
-    let coerced = ir.add_expr(IrExpr::TypeOp {
-        op: crate::ir::IrTypeOp::ImplicitCoercion,
-        arg: call,
-        type_operand: Ty::nullable(Ty::Int),
-    });
+    let coerced = ir.add_expr(IrExpr::type_op(
+        crate::ir::IrTypeOp::ImplicitCoercion,
+        call,
+        Ty::nullable(Ty::Int),
+    ));
     let returned = ir.add_expr(IrExpr::Return(Some(coerced)));
     ir.checked_return_depths.insert(returned, 0);
     let tail = ir.add_expr(IrExpr::Return(None));

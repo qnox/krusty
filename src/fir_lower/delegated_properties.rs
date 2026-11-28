@@ -1354,11 +1354,11 @@ fn materialize_delegated_slot(ir: &mut IrFile, value: ExprId, actual: Ty, declar
     if actual == declared {
         return value;
     }
-    ir.add_expr(IrExpr::TypeOp {
-        op: crate::ir::IrTypeOp::ImplicitCoercion,
-        arg: value,
-        type_operand: declared,
-    })
+    ir.add_expr(IrExpr::type_op(
+        crate::ir::IrTypeOp::ImplicitCoercion,
+        value,
+        declared,
+    ))
 }
 
 fn materialize_delegated_result(
@@ -1375,11 +1375,11 @@ fn materialize_delegated_result(
     }
     ir.call_declared_ret.insert(expression, declared);
     ir.set_physical_type(expression, declared.erased_recv());
-    ir.add_expr(IrExpr::TypeOp {
-        op: crate::ir::IrTypeOp::ImplicitCoercion,
-        arg: expression,
-        type_operand: result,
-    })
+    ir.add_expr(IrExpr::type_op(
+        crate::ir::IrTypeOp::ImplicitCoercion,
+        expression,
+        result,
+    ))
 }
 
 #[cfg(test)]
@@ -1464,6 +1464,7 @@ mod tests {
             op: IrTypeOp::ImplicitCoercion,
             arg: call,
             type_operand: Ty::Int,
+            ..
         } = ir.expr(*converted)
         else {
             panic!("generic getValue result must cross an explicit Int coercion");
@@ -1506,6 +1507,7 @@ mod tests {
                     op: IrTypeOp::ImplicitCoercion,
                     arg,
                     type_operand,
+                    ..
                 } => {
                     assert!(
                         !matches!(
@@ -1685,8 +1687,7 @@ mod tests {
                 IrExpr::TypeOp {
                     op: crate::ir::IrTypeOp::ImplicitCoercion,
                     arg,
-                    type_operand,
-                } if *arg == value && *type_operand == Ty::nullable(Ty::obj("kotlin/Any"))
+                    type_operand, .. } if *arg == value && *type_operand == Ty::nullable(Ty::obj("kotlin/Any"))
             ),
             "the written value crosses into the slot the operator declares"
         );

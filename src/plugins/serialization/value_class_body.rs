@@ -286,11 +286,11 @@ impl ValueClassBody<'_> {
                 } else {
                     *ty
                 };
-                ir.add_expr(IrExpr::TypeOp {
-                    op: crate::ir::IrTypeOp::Cast,
-                    arg: decoded,
-                    type_operand: decoded_ty,
-                })
+                ir.add_expr(IrExpr::type_op(
+                    crate::ir::IrTypeOp::Cast,
+                    decoded,
+                    decoded_ty,
+                ))
             }
         };
         let internal = ir.classes[self.serialized_class as usize].fq_name_id();

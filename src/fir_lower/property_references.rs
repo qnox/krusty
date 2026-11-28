@@ -271,14 +271,13 @@ impl BodyLowering<'_> {
             let declared_type = declared.map_or(property_type, |(_, declared)| declared);
             self.ir.set_logical_type(read, declared_type.get());
         }
-        let read = match declared {
-            Some((_, declared)) if declared != property_type => self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: read,
-                type_operand: property_type.get(),
-            }),
-            _ => read,
-        };
+        let read =
+            match declared {
+                Some((_, declared)) if declared != property_type => self.ir.add_expr(
+                    IrExpr::type_op(IrTypeOp::ImplicitCoercion, read, property_type.get()),
+                ),
+                _ => read,
+            };
         let body =
             self.ir
                 .callable_reference_adapter_body(read, property_type.get(), reference.ret);

@@ -60,11 +60,7 @@ impl IrFile {
         } else {
             IrTypeOp::InstanceOf
         };
-        self.add_expr(IrExpr::TypeOp {
-            op,
-            arg: operand,
-            type_operand: target,
-        })
+        self.add_expr(IrExpr::type_op(op, operand, target))
     }
 
     /// `value as? target`, for a `value` of the checked type `operand_type`: one evaluation followed
@@ -78,6 +74,7 @@ impl IrFile {
         mut value: ExprId,
         operand_type: Ty,
         target: Ty,
+        erased: Option<Ty>,
         temporary: impl FnOnce() -> u32,
     ) -> ExprId {
         // A safe cast to either `Nothing` or `Nothing?` can never produce a non-null value. Fold
@@ -101,11 +98,7 @@ impl IrFile {
             Ty::obj("kotlin/Unit")
         } else if operand_type.scalar_value_repr().is_some() {
             let any = Ty::obj("kotlin/Any");
-            value = self.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: value,
-                type_operand: any,
-            });
+            value = self.add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, value, any));
             any
         } else {
             crate::types::stored_value_ty(operand_type)
@@ -137,6 +130,13 @@ impl IrFile {
         };
         let read = self.add_expr(IrExpr::GetValue(operand_slot));
         let matches = self.instance_check(false, read, runtime_target);
+        if let IrExpr::TypeOp {
+            erased: test_erased,
+            ..
+        } = &mut self.exprs[matches as usize]
+        {
+            *test_erased = erased;
+        }
         let read = self.add_expr(IrExpr::GetValue(operand_slot));
         // `as? T` yields `T?`. A concrete primitive already names its boxed wrapper (`Int?`).
         // A type parameter does not: an inline call later substitutes `T` with `Int`, and a
@@ -147,11 +147,8 @@ impl IrFile {
         } else {
             runtime_target
         };
-        let cast = self.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: read,
-            type_operand: cast_target,
-        });
+        let cast =
+            self.add_expr(IrExpr::type_op(IrTypeOp::Cast, read, cast_target).with_erased(erased));
         let null = self.add_expr(IrExpr::Const(IrConst::Null));
         let result = self.add_expr(IrExpr::When {
             branches: vec![(Some(matches), cast), (None, null)],

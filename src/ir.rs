@@ -441,11 +441,15 @@ pub enum IrExpr {
     When {
         branches: Vec<(Option<ExprId>, ExprId)>,
     },
-    /// `IrTypeOperatorCall` — `is`/`!is`/`as`/`as?`/implicit casts/coercions.
+    /// `IrTypeOperatorCall` — `is`/`!is`/`as`/`as?`/implicit casts/coercions. Build with
+    /// [`IrExpr::type_op`]; a pattern names the fields it reads and ends in `..`.
     TypeOp {
         op: IrTypeOp,
         arg: ExprId,
         type_operand: Ty,
+        /// What a cast checks at run time when `type_operand` is a type parameter: its erasure,
+        /// recorded by the checker. `None` for every other operation.
+        erased: Option<Ty>,
     },
     /// `IrWhile` loop. `update` (if present) runs after `body` each iteration, at the `continue`
     /// target — it carries a `for`-loop's increment so `continue` advances the loop rather than

@@ -242,11 +242,11 @@ impl SerializeBody<'_> {
         // viewed as the superclass.
         if let Some(inherited) = &inherited {
             let value = ir.add_expr(IrExpr::GetValue(value_slot));
-            let value = ir.add_expr(IrExpr::TypeOp {
-                op: crate::ir::IrTypeOp::Cast,
-                arg: value,
-                type_operand: Ty::obj_name(inherited.owner),
-            });
+            let value = ir.add_expr(IrExpr::type_op(
+                crate::ir::IrTypeOp::Cast,
+                value,
+                Ty::obj_name(inherited.owner),
+            ));
             let output = ir.add_expr(IrExpr::GetValue(encoder_slot));
             let descriptor = ir.add_expr(IrExpr::GetValue(2));
             let mut args = vec![value, output, descriptor];
@@ -261,11 +261,11 @@ impl SerializeBody<'_> {
                     bail = true;
                     break;
                 };
-                args.push(ir.add_expr(IrExpr::TypeOp {
-                    op: crate::ir::IrTypeOp::Cast,
-                    arg: serializer,
-                    type_operand: super::class_ty(super::KSERIALIZER_FQ),
-                }));
+                args.push(ir.add_expr(IrExpr::type_op(
+                    crate::ir::IrTypeOp::Cast,
+                    serializer,
+                    super::class_ty(super::KSERIALIZER_FQ),
+                )));
             }
             let callee = match inherited.write_self {
                 Some(function) => Callee::ClassStatic {

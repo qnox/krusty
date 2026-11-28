@@ -23,6 +23,7 @@ fn generic_call_result_boundary_keeps_declared_and_selected_types() {
                 op: IrTypeOp::ImplicitCoercion,
                 arg,
                 type_operand,
+                ..
             } = ir.expr(coercion)
             else {
                 return None;

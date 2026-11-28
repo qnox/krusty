@@ -652,11 +652,7 @@ fn add_delegate_method(ir: &mut IrFile, method: DelegateMethod) -> u32 {
             }
             ir.set_logical_type(value, storage_ty);
             if storage_ty.is_jvm_scalar() {
-                ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: value,
-                    type_operand: result,
-                })
+                ir.add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, value, result))
             } else {
                 value
             }

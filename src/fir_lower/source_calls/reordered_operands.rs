@@ -71,6 +71,7 @@ impl BodyLowering<'_> {
             op: IrTypeOp::ImplicitCoercion,
             arg,
             type_operand,
+            ..
         } = self.ir.expr(value)
         {
             if let Some(operand_ty) = self.ir.logical_type(arg) {
@@ -78,11 +79,11 @@ impl BodyLowering<'_> {
                 if boxed || self.is_reference_value(arg) {
                     let read = self.spill_call_operand(arg, operand_ty, statements);
                     let read = self.reordered_operand_replay(value, read);
-                    return self.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg: read,
+                    return self.ir.add_expr(IrExpr::type_op(
+                        IrTypeOp::ImplicitCoercion,
+                        read,
                         type_operand,
-                    });
+                    ));
                 }
             }
         }

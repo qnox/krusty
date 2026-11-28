@@ -1856,11 +1856,7 @@ pub(super) fn bridge_external_result(
     // class result is already returned as its unboxed carrier.
     ir.set_logical_type(call, semantic);
     ir.set_physical_type(call, physical);
-    ir.exprs[index] = IrExpr::TypeOp {
-        op: krusty::ir::IrTypeOp::ImplicitCoercion,
-        arg: call,
-        type_operand: semantic,
-    };
+    ir.exprs[index] = IrExpr::type_op(krusty::ir::IrTypeOp::ImplicitCoercion, call, semantic);
     ir.jvm_external_result_coercions
         .insert(index as krusty::ir::ExprId);
     call

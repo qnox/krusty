@@ -866,11 +866,11 @@ fn emit_constructed_standard_serializer(
 /// operand's static type is a concrete serializer class (`StringSerializer.INSTANCE`) and vanishes
 /// where it already is `KSerializer` (a type parameter's serializer, another factory's result).
 fn narrow_to_kserializer(ir: &mut IrFile, serializer: ExprId) -> ExprId {
-    ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: serializer,
-        type_operand: class_ty(KSERIALIZER_FQ),
-    })
+    ir.add_expr(IrExpr::type_op(
+        IrTypeOp::Cast,
+        serializer,
+        class_ty(KSERIALIZER_FQ),
+    ))
 }
 
 fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> ExprId {

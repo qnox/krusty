@@ -145,11 +145,7 @@ mod tests {
     fn test_of(ir: &mut IrFile, classifier: &str) -> Ty {
         let target = Ty::obj_name(type_name(classifier));
         let arg = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-        ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::InstanceOf,
-            arg,
-            type_operand: target,
-        });
+        ir.add_expr(IrExpr::type_op(IrTypeOp::InstanceOf, arg, target));
         target
     }
 

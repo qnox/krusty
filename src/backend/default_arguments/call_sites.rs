@@ -306,11 +306,7 @@ pub(super) fn replace(ir: &mut IrFile, site: ExprId, call: IrExpr, result: Ty) {
             let call = ir.add_expr(call);
             ir.set_logical_type(call, result);
             ir.call_declared_ret.remove(&site);
-            ir.exprs[site as usize] = IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: call,
-                type_operand: site_type,
-            };
+            ir.exprs[site as usize] = IrExpr::type_op(IrTypeOp::ImplicitCoercion, call, site_type);
             return;
         }
     }
