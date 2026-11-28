@@ -30,6 +30,8 @@ pub(crate) use classifier_scope::{
     ClassifierImportLevel, ScopedClassifier,
 };
 mod declaration_specificity;
+mod default_call_shape;
+use default_call_shape::{default_literal_ty, record_default_vararg_slot};
 mod extension_specialization;
 mod generic_inference;
 pub(crate) use generic_inference::{reified_runtime_type, ReifiedDeclarations};
@@ -105,9 +107,10 @@ pub(crate) use member_hierarchy::{
     checked_function_result_refines, declared_member_callables, declared_member_declarations,
     function_declaration_identity, function_input_shapes_match,
     function_override_input_slots_match, function_result_refines, imported_object_member_symbols,
-    inherited_nested_classifier_name, inherits_nested_classifiers_through,
-    lexical_enclosing_classifier_names, member_declarations_in_hierarchy, member_is_inheritable,
-    members_in_hierarchy, nested_classifier_supertypes, normalize_inherited_member_functions,
+    inherited_nested_classifier_name, inherited_override_inputs,
+    inherits_nested_classifiers_through, lexical_enclosing_classifier_names,
+    member_declarations_in_hierarchy, member_is_inheritable, members_in_hierarchy,
+    nested_classifier_supertypes, normalize_inherited_member_functions,
     override_input_shapes_match, override_parameter_types_match, property_declaration_identity,
     specialize_member_function, supertype_preorder, BoundInnerConstructorContext,
     InheritedNestedClassifier, InnerAliasOuterApplication, OverrideInputShape,
@@ -734,44 +737,6 @@ fn callable_with_return(c: &LibraryCallable, ret: Ty, default_call: bool) -> Lib
         vararg_elem: None,
         vararg_index: None,
         ..c.clone()
-    }
-}
-
-/// The Kotlin type a default literal has. `null` has none — see [`SymbolResolver::default_literal_fits`].
-fn default_literal_ty(value: &crate::libraries::DefaultValue) -> Option<Ty> {
-    use crate::libraries::DefaultValue;
-    Some(match value {
-        DefaultValue::Int(_) => Ty::Int,
-        DefaultValue::Long(_) => Ty::Long,
-        DefaultValue::Double(_) => Ty::Double,
-        DefaultValue::Float(_) => Ty::Float,
-        DefaultValue::Bool(_) => Ty::Boolean,
-        DefaultValue::Char(_) => Ty::Char,
-        DefaultValue::Str(_) => Ty::String,
-        _ => return None,
-    })
-}
-
-/// Record the vararg slot/element on a `$default` callable so the lowerer packs loose trailing
-/// elements into the slot's array — or emits an EMPTY array when the vararg itself is omitted
-/// (kotlinc's `$default` passes the array straight through, so the slot takes NO mask bit and a
-/// null placeholder would trip the callee's non-null vararg check). The arg-vs-param identity
-/// guard keeps a caller passing the array itself (`f("n", arr)`) from being packed.
-fn record_default_vararg_slot(
-    callable: &mut LibraryCallable,
-    vararg_index: Option<usize>,
-    params: &[Ty],
-    args: &[Ty],
-) {
-    let Some(index) = vararg_index else {
-        return;
-    };
-    let Some(elem) = params.get(index).and_then(|param| param.array_read_elem()) else {
-        return;
-    };
-    if args.get(index).copied() != params.get(index).copied() {
-        callable.vararg_elem = Some(elem);
-        callable.vararg_index = Some(index);
     }
 }
 

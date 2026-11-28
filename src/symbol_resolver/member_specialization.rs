@@ -449,6 +449,60 @@ fn specialize_member_type_with_unbound(
     }
 }
 
+/// `specialized` with each classifier argument that the declaration wrote as a Java type variable
+/// (`Class<? extends T>`) kept flexible. Such a variable is `T!` at that occurrence: its bound
+/// records the Java flexibility, so binding it to a not-null `File` gives `Class<out File!>`, which
+/// a Kotlin override may state with either face. The specialization itself (raw erasure, refreshed
+/// bounds) is already done; where the two shapes differ there is no argument to rewrap.
+pub(crate) fn retain_flexible_type_arguments(declared: Ty, specialized: Ty) -> Ty {
+    fn argument(declared: Ty, specialized: Ty) -> Ty {
+        match (declared.kind(), specialized.kind()) {
+            (TyKind::OutProjection(declared), TyKind::OutProjection(specialized)) => {
+                Ty::out_projection(argument(declared, specialized))
+            }
+            (TyKind::InProjection(declared), TyKind::InProjection(specialized)) => {
+                Ty::in_projection(argument(declared, specialized))
+            }
+            (TyKind::TyParam(_, bound) | TyKind::Var(_, bound), _)
+                if bound.is_platform_nullable()
+                    && specialized.is_reference()
+                    && !specialized.is_nullable()
+                    && !specialized.is_platform_nullable()
+                    && !specialized.is_ty_param() =>
+            {
+                Ty::platform_nullable(specialized)
+            }
+            _ => retain_flexible_type_arguments(declared, specialized),
+        }
+    }
+    match (declared.kind(), specialized.kind()) {
+        (TyKind::Obj(declared_owner, declared_arguments), TyKind::Obj(owner, arguments))
+            if declared_owner == owner
+                && !arguments.is_empty()
+                && declared_arguments.len() == arguments.len() =>
+        {
+            Ty::obj_args_name(
+                owner,
+                &declared_arguments
+                    .iter()
+                    .zip(arguments.iter())
+                    .map(|(declared, specialized)| argument(*declared, *specialized))
+                    .collect::<Vec<_>>(),
+            )
+        }
+        (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(specialized)) => {
+            Ty::platform_nullable(retain_flexible_type_arguments(declared, specialized))
+        }
+        (TyKind::Nullable(declared), TyKind::Nullable(specialized)) => {
+            Ty::nullable(retain_flexible_type_arguments(declared, specialized))
+        }
+        (TyKind::MutabilityFlexible(declared), TyKind::MutabilityFlexible(specialized)) => {
+            Ty::mutability_flexible(retain_flexible_type_arguments(declared, specialized))
+        }
+        _ => specialized,
+    }
+}
+
 pub(super) fn specialize_member_type(
     source: &dyn SymbolSource,
     ty: Ty,
