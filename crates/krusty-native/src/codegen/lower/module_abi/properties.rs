@@ -648,8 +648,8 @@ impl BodyLowering<'_, '_, '_> {
         if declared.len() != abi.parameters.len() {
             return Err(declined!(
                 "a cross-file accessor taking {} operands for {} parameters",
-                abi.parameters.len(),
-                declared.len()
+                declared.len(),
+                abi.parameters.len()
             ));
         }
         let Some(mut operands) = self.module_property_receiver(abi, receiver)? else {

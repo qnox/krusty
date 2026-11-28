@@ -443,8 +443,8 @@ impl BodyLowering<'_, '_, '_> {
         if supplied.len() != parameters.len() {
             return Err(declined!(
                 "an accessor taking {} operands for {} parameters",
-                parameters.len(),
-                supplied.len()
+                supplied.len(),
+                parameters.len()
             ));
         }
         let mut arguments = Vec::with_capacity(supplied.len());

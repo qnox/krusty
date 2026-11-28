@@ -102,13 +102,13 @@ pub fn layout_parameters(layout: &IrLocalPropertyLayout) -> Vec<Ty> {
 
 /// The same operands for a property another file of the module declares, from its module record.
 ///
-/// A `companion { }` block property's recorded extension receiver is its declaring classifier: the
-/// coordinate that associates it with the class, which its accessors do not take.
+/// A companion-associated property's recorded extension receiver (a `companion { }` block member,
+/// or a companion extension `companion val C.p`) is its classifier: a name-resolution coordinate,
+/// not a parameter. Its accessors take no receiver value, as the defining file's layout records.
 pub fn record_parameters(record: &IrModuleProperty) -> Vec<Ty> {
-    let extension_receiver = match record.placement {
-        IrStaticPlacement::CompanionBlock { .. } => None,
-        IrStaticPlacement::Package => record.extension_receiver,
-    };
+    let associated = record.companion_associated
+        || matches!(record.placement, IrStaticPlacement::CompanionBlock { .. });
+    let extension_receiver = record.extension_receiver.filter(|_| !associated);
     record
         .context_parameters
         .iter()
