@@ -819,3 +819,45 @@ fn scratch_directory_classpaths_are_not_retained() {
         &[manifest.join("Cargo.toml")]
     ));
 }
+
+/// One worker thread compiles many cases against its reused classpath, and each case's Java is a
+/// fresh overlay. A field of the same physical shape as a previous case's (`JavaClass.X`) must read
+/// this case's constant, not the one the previous case's class carried.
+#[test]
+fn a_reused_classpath_reads_each_overlay_class_s_own_constants() {
+    let case = |java_field: &str| {
+        format!(
+            "// FILE: JavaClass.java\npublic class JavaClass {{\n    {java_field}\n}}\n\n\
+             // FILE: main.kt\nfun read(x1: String?): String {{\n    val x: String?\n    x = x1 ?: JavaClass.X\n    return x\n}}\n"
+        )
+    };
+    let constant = |text: &str| {
+        let compiled = compile_box_case(text, "main", &[], None, &|_| {})
+            .unwrap_or_else(|failure| panic!("compile:\n{text}\n{failure:?}"));
+        let main = &compiled
+            .flat
+            .iter()
+            .find(|(name, _)| name == "MainKt")
+            .expect("MainKt is emitted")
+            .1;
+        ["previousCase", "thisCase"]
+            .into_iter()
+            .filter(|sentinel| {
+                main.windows(sentinel.len())
+                    .any(|window| window == sentinel.as_bytes())
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        constant(&case("public static final String X = \"previousCase\";")),
+        ["previousCase"]
+    );
+    assert_eq!(
+        constant(&case("public static final String X = \"thisCase\";")),
+        ["thisCase"]
+    );
+    assert_eq!(
+        constant(&case("public static final String X = null;")),
+        Vec::<&str>::new()
+    );
+}

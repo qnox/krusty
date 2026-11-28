@@ -129,6 +129,27 @@ impl Classpath {
         identity
     }
 
+    /// Forget the identities of declarations whose physical owner is one of `owners`. A reused
+    /// classpath whose overlay replaces a class must intern that class's declarations afresh: the
+    /// next request's class can carry another constant, accessor, or signature under the same
+    /// physical key. Retired realizations stay addressable by the ids already handed out.
+    pub(super) fn forget_external_identities(&self, owners: &crate::fx_hash::HashSet<TypeName>) {
+        {
+            let callables = self.external_callables.borrow();
+            let retired = |identity: crate::fir::ExternalCallableId| {
+                callables
+                    .get(identity.raw() as usize)
+                    .is_some_and(|realization| owners.contains(&realization.callable.owner))
+            };
+            self.external_property_ids
+                .borrow_mut()
+                .retain(|key, _| !retired(key.getter) && !key.setter.is_some_and(retired));
+        }
+        self.external_callable_ids
+            .borrow_mut()
+            .retain(|key, _| !owners.contains(&key.owner));
+    }
+
     pub fn external_property(
         &self,
         identity: crate::fir::ExternalPropertyId,
