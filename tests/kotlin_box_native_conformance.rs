@@ -393,6 +393,109 @@ fn native_an_observable_member_delegate_notifies_its_instance() {
     expect_native_klib_box(source, "nativeObservableDelegateMember");
 }
 
+// Delegation to a property reference calls the standard library's inline `getValue`/`setValue`,
+// which only the Native stdlib KLIB carries, so these programs are analysed against it.
+#[test]
+fn a_property_delegating_to_a_bound_reference_reads_through_it() {
+    // `by O::z` is the stdlib's `inline` `KProperty0.getValue`, expanded from its KLIB template.
+    expect_native_klib_box(
+        "object Source {\n\
+         \x20   val held: Int = 42\n\
+         }\n\
+         class Holder {\n\
+         \x20   val borrowed by Source::held\n\
+         }\n\
+         fun box(): String = if (Holder().borrowed == 42) \"OK\" else \"fail: ${Holder().borrowed}\"\n",
+        "nativeDelegateToABoundReference",
+    );
+}
+
+#[test]
+fn a_property_delegating_to_a_top_level_reference_reads_and_writes() {
+    // The mutable half: `setValue` on a `KMutableProperty0` is the reference's own `set`, so the
+    // write has to reach the property the reference names and not a field of the delegate.
+    expect_native_klib_box(
+        "var held: String = \"fail\"\n\
+         var borrowed by ::held\n\
+         fun box(): String {\n\
+         \x20   borrowed = \"OK\"\n\
+         \x20   if (held != \"OK\") return \"fail write: $held\"\n\
+         \x20   return if (borrowed == \"OK\") \"OK\" else \"fail read: $borrowed\"\n\
+         }\n",
+        "nativeDelegateToATopLevelReference",
+    );
+}
+
+#[test]
+fn a_property_delegating_to_an_unbound_reference_is_handed_the_owner() {
+    // A `KProperty1` names a member and is HANDED the object, which for a delegate is the owner
+    // of the delegating property — the one operand that separates these two overloads.
+    expect_native_klib_box(
+        "class Cell(val held: String) {\n\
+         \x20   val borrowed by Cell::held\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val cell = Cell(\"OK\")\n\
+         \x20   return if (cell.borrowed == \"OK\") \"OK\" else \"fail: ${cell.borrowed}\"\n\
+         }\n",
+        "nativeDelegateToAnUnboundReference",
+    );
+}
+
+#[test]
+fn a_local_property_delegating_to_a_reference_reads_through_it() {
+    expect_native_klib_box(
+        "val held: String = \"OK\"\n\
+         fun box(): String {\n\
+         \x20   val borrowed by ::held\n\
+         \x20   return borrowed\n\
+         }\n",
+        "nativeLocalDelegateToAReference",
+    );
+}
+
+#[test]
+fn delegating_to_a_reference_reaches_the_source_accessor() {
+    // The delegate is the reference, not a copy of the value: each read asks the property again,
+    // which a source-written getter makes visible.
+    expect_native_klib_box(
+        "var reads = 0\n\
+         val held: Int\n\
+         \x20   get() {\n\
+         \x20       reads++\n\
+         \x20       return reads\n\
+         \x20   }\n\
+         val borrowed by ::held\n\
+         fun box(): String {\n\
+         \x20   if (borrowed != 1) return \"fail first: $borrowed\"\n\
+         \x20   if (borrowed != 2) return \"fail second: $borrowed\"\n\
+         \x20   return if (reads == 2) \"OK\" else \"fail count: $reads\"\n\
+         }\n",
+        "nativeDelegateToAReferenceAsksAgain",
+    );
+}
+
+/// An OBJECT's `const val`, whose static the object itself owns — and the object's initializer
+/// still runs, which is what separates reaching the constant from reaching the object.
+#[test]
+fn a_reference_to_an_objects_const_is_delegated_to() {
+    let source = "var sideEffect = \"Fail\"\n\
+         object Property {\n\
+         \x20   init {\n\
+         \x20       sideEffect = \"OK\"\n\
+         \x20   }\n\
+         \x20   const val PROPERTY_VALUE: String = \"O\"\n\
+         }\n\
+         const val TOP_LEVEL_PROPERTY_VALUE: String = \"K\"\n\
+         val value1: String by Property::PROPERTY_VALUE\n\
+         val value2: String by ::TOP_LEVEL_PROPERTY_VALUE\n\
+         fun box(): String {\n\
+         \x20   if (sideEffect != \"OK\") return \"fail the object's initializer\"\n\
+         \x20   return value1 + value2\n\
+         }\n";
+    expect_native_klib_box(source, "nativeObjectConstReference");
+}
+
 #[test]
 fn an_explicit_delegate_write_evaluates_this_ref() {
     let source = "import kotlin.properties.Delegates\n\
