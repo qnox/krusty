@@ -155,6 +155,18 @@ fn fill(mask: u32, bit: i32, slot: u32, value: &str) -> String {
 }
 
 #[test]
+fn a_suspend_entry_frame_puts_the_masks_before_the_continuation() {
+    assert_eq!(
+        entry_frame(&["r", "p", "q"], false, ["m"]),
+        ["r", "p", "q", "m"]
+    );
+    assert_eq!(
+        entry_frame(&["r", "p", "k"], true, ["m"]),
+        ["r", "p", "m", "k"]
+    );
+}
+
+#[test]
 fn masks_take_one_word_per_32_parameters() {
     assert_eq!(mask_words(1), 1);
     assert_eq!(mask_words(32), 1);
@@ -422,6 +434,50 @@ fn a_call_site_passes_every_parameter_and_constant_mask_words() {
             fill(35, 2, 33, "\"x\""),
         )
     );
+}
+
+#[test]
+fn the_entry_of_a_suspend_function_is_a_suspend_function() {
+    let mut ir = IrFile::default();
+    let parameter = ir.add_expr(IrExpr::GetValue(0));
+    let returned = ir.add_expr(IrExpr::Return(Some(parameter)));
+    let function = declare(
+        &mut ir,
+        "pause",
+        vec![Ty::Int],
+        Ty::Int,
+        Some(returned),
+        None,
+    );
+    ir.suspend_funs.push(function);
+    let default = int(&mut ir, 3);
+    with_defaults(&mut ir, function, vec![Some(default)]);
+    let call = ir.add_expr(IrExpr::Call {
+        callee: Box::new(Callee::LocalWithDefaults {
+            function,
+            defaults: Box::new([0]),
+        }),
+        dispatch_receiver: None,
+        args: Vec::new(),
+    });
+    let caller = declare(&mut ir, "caller", Vec::new(), Ty::Int, Some(call), None);
+    ir.suspend_funs.push(caller);
+
+    realize(
+        &mut ir,
+        &mut CheckedBackendCallables::default(),
+        |_| false,
+        |_| false,
+        &[],
+    );
+
+    let entry = ir.default_entries[&function];
+    assert_eq!(body(&ir, caller), format!("fun{entry}(absent Int, 1)"));
+    assert_eq!(
+        body(&ir, entry),
+        format!("{{ {}; return fun{function}($0) }}", fill(1, 1, 0, "3"))
+    );
+    assert_eq!(ir.suspend_funs, vec![function, caller, entry]);
 }
 
 #[test]

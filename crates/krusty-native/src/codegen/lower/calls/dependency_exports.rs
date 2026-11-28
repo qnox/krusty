@@ -415,35 +415,41 @@ impl BodyLowering<'_, '_, '_> {
                 // A zero in each omitted slot and its bit in the mask; the entry evaluates the
                 // marked defaults in the declaring module, in declaration order.
                 let mut supplied = arguments.into_iter();
-                // A member's receiver leads the operands; the masks number the parameters after
-                // it.
+                // A member's receiver leads the operands and a suspend declaration's continuation
+                // ends them; the masks number the parameters between.
                 let receiver_operands = call.unmasked_receiver_operands();
+                let coroutine = abi_export.signature.has_coroutine_abi();
+                let parameters = declared.len() - receiver_operands - usize::from(coroutine);
                 let masks = krusty::backend::default_arguments::omission_masks(
-                    declared.len() - receiver_operands,
+                    parameters,
                     omitted.iter().map(|&position| position - receiver_operands),
                 );
-                let mut operands = Vec::with_capacity(declared.len() + masks.len());
+                let mut values = Vec::with_capacity(declared.len());
                 for (position, ty) in declared.iter().enumerate() {
                     if omitted.contains(&position) {
-                        operands.push(self.zero_of(*ty));
+                        values.push(self.zero_of(*ty));
                     } else {
-                        operands.push(supplied.next().expect("one value per supplied operand"));
+                        values.push(supplied.next().expect("one value per supplied operand"));
                     }
                 }
-                for mask in masks {
-                    operands.push(
+                let masks = masks
+                    .into_iter()
+                    .map(|mask| {
                         self.builder
                             .ins()
-                            .iconst(types::I32, i64::from(mask as i32)),
-                    );
-                }
-                let mut signature = declared.to_vec();
-                signature.extend(std::iter::repeat_n(
-                    Ty::Int,
-                    krusty::backend::default_arguments::mask_words(
-                        declared.len() - receiver_operands,
+                            .iconst(types::I32, i64::from(mask as i32))
+                    })
+                    .collect::<Vec<_>>();
+                let operands =
+                    krusty::backend::default_arguments::entry_frame(&values, coroutine, masks);
+                let signature = krusty::backend::default_arguments::entry_frame(
+                    declared,
+                    coroutine,
+                    std::iter::repeat_n(
+                        Ty::Int,
+                        krusty::backend::default_arguments::mask_words(parameters),
                     ),
-                ));
+                );
                 (entry.as_str(), signature, operands)
             }
             // An ordinary call to an overridable member runs the receiver's override.

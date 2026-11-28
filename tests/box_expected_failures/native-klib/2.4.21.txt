@@ -146,7 +146,6 @@ contracts/referenceToGenericInDeserializedContract.kt
 controlStructures/breakContinueInExpressions/breakInLoopConditions.kt
 controlflow/for_loops_array_nested.kt
 controlflow/for_loops_coroutines.kt
-coroutines/32defaultParametersInSuspend.kt
 coroutines/asyncIteratorNullMerge_1_3.kt
 coroutines/asyncIteratorToList_1_3.kt
 coroutines/asyncIterator_1_3.kt
@@ -185,12 +184,10 @@ coroutines/coroutineContext1.kt
 coroutines/coroutineContext2.kt
 coroutines/coroutineContextInInlinedLambda.kt
 coroutines/defaultParameterLambdaInSuspend.kt
-coroutines/defaultParametersInSuspend.kt
 coroutines/deserializedSuspendFunctionProperty.kt
 coroutines/doubleColonExpressionsGenerationInBuilderInference.kt
 coroutines/falseUnitCoercion.kt
 coroutines/featureIntersection/breakWithNonEmptyStack.kt
-coroutines/featureIntersection/callableReference/function/adapted.kt
 coroutines/featureIntersection/callableReference/function/genericCallableReferencesWithNullableTypes.kt
 coroutines/featureIntersection/funInterface.kt
 coroutines/featureIntersection/funInterface/kt47549.kt
@@ -202,14 +199,11 @@ coroutines/featureIntersection/suspendInlineSuspendFinally.kt
 coroutines/featureIntersection/suspendOperatorPlusAssign.kt
 coroutines/featureIntersection/tailrec/controlFlowIf.kt
 coroutines/featureIntersection/tailrec/controlFlowWhen.kt
-coroutines/featureIntersection/tailrec/realStringEscape.kt
-coroutines/featureIntersection/tailrec/realStringRepeat.kt
 coroutines/functionReference_Function_SuspendFunction_casts.kt
 coroutines/handleException.kt
 coroutines/inlineClasses/direct/boxTypeParameterOfSuperType.kt
 coroutines/inlineClasses/direct/boxTypeParameterOfSuperTypeResult.kt
 coroutines/inlineClasses/direct/covariantOverrideSuspendFunWithNullableInlineClass_NullableInt_null.kt
-coroutines/inlineClasses/direct/defaultStub.kt
 coroutines/inlineClasses/direct/genericOverrideSuspendFun.kt
 coroutines/inlineClasses/direct/genericOverrideSuspendFun_Any.kt
 coroutines/inlineClasses/direct/genericOverrideSuspendFun_Any_NullableInlineClassUpperBound.kt
@@ -224,7 +218,6 @@ coroutines/inlineClasses/resume/boxTypeParameterOfSuperTypeResult.kt
 coroutines/inlineClasses/resume/boxUnboxInsideCoroutine_nonLocalReturn.kt
 coroutines/inlineClasses/resume/covariantOverrideSuspendFunWithNullableInlineClass_NullableInt_null.kt
 coroutines/inlineClasses/resume/createMangling.kt
-coroutines/inlineClasses/resume/defaultStub.kt
 coroutines/inlineClasses/resume/genericOverrideSuspendFun.kt
 coroutines/inlineClasses/resume/genericOverrideSuspendFun_Any.kt
 coroutines/inlineClasses/resume/genericOverrideSuspendFun_Any_NullableInlineClassUpperBound.kt
@@ -266,15 +259,12 @@ coroutines/kt46813.kt
 coroutines/kt49168.kt
 coroutines/kt51530.kt
 coroutines/kt51718.kt
-coroutines/localFunctions/named/defaultArgument.kt
 coroutines/longRangeInSuspendCall.kt
 coroutines/multiModule/inheritFromAnotherModule.kt
 coroutines/multiModule/inlineMultiModuleOverride.kt
 coroutines/nestedTryCatch.kt
-coroutines/overrideDefaultArgument.kt
 coroutines/returnsNothing1.kt
 coroutines/simpleException.kt
-coroutines/simpleWithDefaultValue.kt
 coroutines/stackUnwinding/rethrowInFinallyWithSuspension.kt
 coroutines/stopAfter.kt
 coroutines/suspendConversion/suspendConversionBetweenFunInterfaces.kt
@@ -292,7 +282,6 @@ coroutines/tailCallOptimizations/crossinline.kt
 coroutines/tailCallOptimizations/innerObjectRetransformation.kt
 coroutines/tailCallOptimizations/tryCatch.kt
 coroutines/tailCallOptimizations/unit/functionReference.kt
-coroutines/tailCallOptimizations/wrapContinuation/multilineSuspendingCallWithDefaultParameterValue.kt
 coroutines/tailCallToNothing.kt
 coroutines/tailOperations/suspendWithTryCatch.kt
 coroutines/tryCatchFinallyWithHandleResult.kt
@@ -447,7 +436,6 @@ multiplatform/k2/basic/overridesOfExpectMembers.kt
 multiplatform/k2/basic/substitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/widerVisibilityInActualClassifier.kt
 multiplatform/k2/defaultArguments/kt67488.kt
-multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/delegation/delegationToExpectInterface_noNewMembers.kt
 multiplatform/k2/expectStatic.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt

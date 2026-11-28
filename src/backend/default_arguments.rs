@@ -29,7 +29,7 @@ mod masks;
 mod tests;
 
 pub use entries::{published_entry, published_identities};
-pub use masks::{mask_words, omission_masks};
+pub use masks::{entry_frame, mask_words, omission_masks};
 
 use super::CheckedBackendCallables;
 use crate::fx_hash::HashSet;
