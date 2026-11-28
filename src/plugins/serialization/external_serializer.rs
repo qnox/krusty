@@ -10,7 +10,7 @@
 use crate::kt_string::KtString;
 use crate::types::{
     type_name, AnnotationValue, ClassifierDeclarationFacts, ClassifierDeclarationKind,
-    ResolvedAnnotation, TypeName,
+    EnumEntryFacts, ResolvedAnnotation, TypeName,
 };
 
 use super::annotations::SERIAL_NAME_FQ;
@@ -37,6 +37,15 @@ pub enum ExternalSerializer {
     /// An interface with no serializer of its own: kotlinx.serialization serializes it
     /// polymorphically, as `PolymorphicSerializer(<interface>::class)`.
     Polymorphic,
+    /// An enum that is not `@Serializable`: kotlinc builds its serializer where it is used, with
+    /// the runtime's enum factory over the entries and each entry's `@SerialName`.
+    PlainEnum {
+        serial_name: KtString,
+        /// The enum states its own `@SerialName`, which makes kotlinc use the annotated factory.
+        declares_serial_name: bool,
+        /// Each entry's `@SerialName`, in declaration order; `None` for an entry without one.
+        entry_serial_names: Vec<Option<KtString>>,
+    },
 }
 
 /// The serializer kotlinc's plugin generated for `classifier`, a `@Serializable` declaration with no
@@ -66,6 +75,32 @@ pub(crate) fn generated_external_serializer(
         // singleton. Naming the plugin ABI is not evidence that this declaration generated it.
         ClassifierDeclarationKind::Class => None,
     }
+}
+
+/// The serializer kotlinc builds at a use site of an enum that is not `@Serializable`. `None` when
+/// the facts cannot name the enum or carry an annotation value they must read: the element stays
+/// underivable rather than taking a guessed name.
+pub(crate) fn plain_enum_serializer(
+    declaration: &ClassifierDeclarationFacts,
+    annotations: &[ResolvedAnnotation],
+    entries: &[EnumEntryFacts],
+) -> Option<ExternalSerializer> {
+    if declaration.kind != ClassifierDeclarationKind::Enum {
+        return None;
+    }
+    let declared = class_serial_name(annotations)?;
+    let declares_serial_name = declared.is_some();
+    let serial_name =
+        declared.or_else(|| declaration.qualified_name.as_deref().map(KtString::from))?;
+    let entry_serial_names = entries
+        .iter()
+        .map(|entry| class_serial_name(&entry.annotations))
+        .collect::<Option<Vec<_>>>()?;
+    Some(ExternalSerializer::PlainEnum {
+        serial_name,
+        declares_serial_name,
+        entry_serial_names,
+    })
 }
 
 /// The serializer of a classifier whose `@Serializable(with = …)` names a serializer CLASS rather

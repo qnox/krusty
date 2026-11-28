@@ -28,7 +28,9 @@ pub(crate) use deserialization_constructor::deserialization_parameter_ty;
 pub use external_parent::ExternalSerializableParents;
 pub(crate) use external_parent::{external_serializable_parents, inherited_element_types};
 pub use external_serializer::ExternalSerializer;
-pub(crate) use external_serializer::{custom_class_serializer, generated_external_serializer};
+pub(crate) use external_serializer::{
+    custom_class_serializer, generated_external_serializer, plain_enum_serializer,
+};
 mod generated_classifier;
 mod generated_members;
 mod program_order_metadata;

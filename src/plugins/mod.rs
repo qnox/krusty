@@ -1321,6 +1321,19 @@ fn external_serializers(
     inherited: Vec<Ty>,
 ) -> crate::fx_hash::HashMap<TypeName, serialization::ExternalSerializer> {
     let serializable = crate::types::type_name(serialization::SERIALIZABLE_FQ);
+    let serial_info = crate::types::type_name("kotlinx/serialization/SerialInfo");
+    // Whether an application among `annotations` is a `@SerialInfo` annotation, or one whose
+    // meta-annotations the facts cannot state, which then cannot be shown not to be one.
+    let carries_serial_info = |annotations: &[crate::types::ResolvedAnnotation]| {
+        annotations.iter().any(|application| {
+            classifiers
+                .classifier_annotations(application.annotation)
+                .is_none_or(|meta| {
+                    meta.iter()
+                        .any(|annotation| annotation.annotation == serial_info)
+                })
+        })
+    };
     external_classifier_candidates_with(ir, inherited)
         .filter_map(|classifier| {
             let annotations = classifiers.classifier_annotations(classifier)?;
@@ -1381,14 +1394,36 @@ fn external_serializers(
                         None => return None,
                     }
                 }
-                // An interface that names no serializer is serialized polymorphically, whoever
-                // declares it; any other classifier without one has no serializer to reach.
+                // An interface that names no serializer is serialized polymorphically and an enum is
+                // built at the use site, whoever declares them; any other classifier without one has
+                // no serializer to reach.
                 (None, None) => {
                     let declaration = classifiers.classifier_declaration(classifier)?;
-                    if declaration.kind != crate::types::ClassifierDeclarationKind::Interface {
-                        return None;
+                    match declaration.kind {
+                        crate::types::ClassifierDeclarationKind::Interface => {
+                            serialization::ExternalSerializer::Polymorphic
+                        }
+                        // An enum that names no serializer is built at the use site.
+                        // kotlinc hands a `@SerialInfo` annotation of the enum or an entry
+                        // to the runtime factory, which the published facts cannot rebuild; such
+                        // an element stays underivable rather than losing it from the descriptor.
+                        crate::types::ClassifierDeclarationKind::Enum => {
+                            let entries = classifiers.enum_entries(classifier)?;
+                            if carries_serial_info(&annotations)
+                                || entries
+                                    .iter()
+                                    .any(|entry| carries_serial_info(&entry.annotations))
+                            {
+                                return None;
+                            }
+                            serialization::plain_enum_serializer(
+                                &declaration,
+                                &annotations,
+                                &entries,
+                            )?
+                        }
+                        _ => return None,
                     }
-                    serialization::ExternalSerializer::Polymorphic
                 }
             };
             if let serialization::ExternalSerializer::Object {
@@ -1396,15 +1431,7 @@ fn external_serializers(
                 ..
             } = &mut serializer
             {
-                let serial_info = crate::types::type_name("kotlinx/serialization/SerialInfo");
-                *serial_info_unsupported = annotations.iter().any(|application| {
-                    classifiers
-                        .classifier_annotations(application.annotation)
-                        .is_none_or(|meta| {
-                            meta.iter()
-                                .any(|annotation| annotation.annotation == serial_info)
-                        })
-                });
+                *serial_info_unsupported = carries_serial_info(&annotations);
             }
             if let serialization::ExternalSerializer::Companion {
                 companion,

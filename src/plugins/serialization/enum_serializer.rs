@@ -18,7 +18,8 @@ pub(super) fn factory_call(
     enums: ExprId,
 ) -> ExprId {
     let entry_serial_names = entry_serial_names(ir, class_id);
-    factory_call_with_names(ir, &entry_serial_names, name, enums)
+    let declares_serial_name = super::annotations::class_declares_serial_name(ir, class_id);
+    factory_call_with_names(ir, &entry_serial_names, declares_serial_name, name, enums)
 }
 
 /// The serializer kotlinc builds for an element whose type is a source enum WITHOUT a generated
@@ -28,6 +29,9 @@ pub(super) fn factory_call(
 pub(in crate::plugins::serialization) struct PlainEnumSerializer {
     classifier: TypeName,
     serial_name: KtString,
+    /// The enum states its own `@SerialName`. kotlinc then builds the annotated serializer even
+    /// when no entry names itself.
+    declares_serial_name: bool,
     entry_serial_names: Vec<Option<KtString>>,
 }
 
@@ -50,15 +54,39 @@ pub(super) fn local_plain_enum_serializer(
     Some(PlainEnumSerializer {
         classifier,
         serial_name: super::annotations::class_serial_name(ir, class_id),
+        declares_serial_name: super::annotations::class_declares_serial_name(ir, class_id),
         entry_serial_names: entry_serial_names(ir, class_id),
     })
+}
+
+impl PlainEnumSerializer {
+    /// The plan for an enum another file or a dependency declares, from its published facts.
+    pub(super) fn external(
+        classifier: TypeName,
+        serial_name: KtString,
+        declares_serial_name: bool,
+        entry_serial_names: Vec<Option<KtString>>,
+    ) -> Self {
+        Self {
+            classifier,
+            serial_name,
+            declares_serial_name,
+            entry_serial_names,
+        }
+    }
 }
 
 /// `EnumsKt.create…EnumSerializer("<serial name>", E.values() as Array<Enum>, …)`.
 pub(super) fn emit_plain_enum_serializer(ir: &mut IrFile, plan: PlainEnumSerializer) -> ExprId {
     let name = ir.add_expr(IrExpr::Const(IrConst::String(plan.serial_name)));
     let enums = enum_values_array(ir, plan.classifier);
-    factory_call_with_names(ir, &plan.entry_serial_names, name, enums)
+    factory_call_with_names(
+        ir,
+        &plan.entry_serial_names,
+        plan.declares_serial_name,
+        name,
+        enums,
+    )
 }
 
 /// `E.values()` narrowed to the factory's `Array<Enum>`. The JVM would accept `[LE;` where
@@ -122,12 +150,13 @@ fn entry_serial_names(ir: &IrFile, class_id: ClassId) -> Vec<Option<KtString>> {
 fn factory_call_with_names(
     ir: &mut IrFile,
     entry_serial_names: &[Option<KtString>],
+    declares_serial_name: bool,
     name: ExprId,
     enums: ExprId,
 ) -> ExprId {
-    // `createSimpleEnumSerializer` derives every name from the constant spelling. A serial name
-    // selects `createAnnotatedEnumSerializer`, whose null name elements mean “use that spelling”.
-    if entry_serial_names.iter().all(Option::is_none) {
+    // `createSimpleEnumSerializer` derives every name from the constant spelling. A serial name,
+    // the enum's or an entry's, selects `createAnnotatedEnumSerializer`, whose null name elements mean “use that spelling”.
+    if !declares_serial_name && entry_serial_names.iter().all(Option::is_none) {
         return ir.add_expr(IrExpr::Call {
             callee: Box::new(Callee::Static {
                 owner: type_name("kotlinx/serialization/internal/EnumsKt"),
