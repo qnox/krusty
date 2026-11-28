@@ -310,9 +310,9 @@ fn compile_source(
     let mut diags = DiagSink::new();
     let mut options = command_line(src, [src])?;
     options.jdk_home = jdk_modules.and_then(jdk_home_of).map(Path::to_path_buf);
-    options
-        .check_jdk_release()
-        .map_err(CompileFailure::CommandLineRefused)?;
+    options.check_jdk_release().map_err(|errors| {
+        CompileFailure::CommandLineRefused(errors.iter().map(ToString::to_string).collect())
+    })?;
     // The stdlib is on krusty's classpath only for `// WITH_STDLIB` tests — the caller passes the
     // located jar (or `None`), exactly as a drop-in `kotlinc` user supplies `-classpath`.
     // Explicit classpath: the kotlin-stdlib jar (for `// WITH_STDLIB`) plus the JDK `lib/modules`
@@ -559,9 +559,9 @@ fn compile_blocks_mixed(
         .map(|(_, source)| source.as_str());
     let mut options = command_line(case, unit)?;
     options.jdk_home = jdk_modules.and_then(jdk_home_of).map(Path::to_path_buf);
-    options
-        .check_jdk_release()
-        .map_err(CompileFailure::CommandLineRefused)?;
+    options.check_jdk_release().map_err(|errors| {
+        CompileFailure::CommandLineRefused(errors.iter().map(ToString::to_string).collect())
+    })?;
     // A folded `dependsOn` chain is a multiplatform compilation even when the fixture does not
     // repeat the feature as a `// LANGUAGE:` directive. The common/platform source roles already
     // carry that topology into the frontend; enable the matching project feature on the exact

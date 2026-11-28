@@ -1440,7 +1440,12 @@ mod tests {
         let compiler = krusty::kotlin_version::environment_release();
         let policy = krusty::features::LanguageVersionPolicy::for_release(compiler).unwrap();
         let first = policy.supported()[0];
-        let parsed = parse_args(&["-Xmetadata-version=bogus", "-language-version", "1.9", "f.kt"]);
+        let parsed = parse_args(&[
+            "-Xmetadata-version=bogus",
+            "-language-version",
+            "1.9",
+            "f.kt",
+        ]);
         assert_eq!(
             parsed.errors,
             [
