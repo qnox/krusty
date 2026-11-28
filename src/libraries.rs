@@ -1000,6 +1000,9 @@ pub struct LibraryCallable {
     /// Annotation class identities declared on this callable. Consumers decide which annotations
     /// affect resolution/emission; the library layer only records their qualified identities.
     pub annotations: Vec<crate::types::TypeName>,
+    /// See [`LibraryMember::is_signature_polymorphic`]: the JVM resolves a call to this declaration
+    /// against the call site's descriptor.
+    pub signature_polymorphic: bool,
     /// The deprecation in effect for this dependency declaration, with the SYMBOL rendering a use's
     /// diagnostic names. A source declaration leaves it unset: its checked annotations state it.
     pub deprecation: Option<std::sync::Arc<crate::types::DeprecatedDeclaration>>,

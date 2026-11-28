@@ -288,7 +288,13 @@ impl Emitter<'_> {
             return;
         }
         let exhaustive = has_else || exhaustive_result.is_some();
-        let keeps_value = discarded && keeps_discarded_value(exhaustive, result_ty);
+        // A signature-polymorphic call ending a branch of a statement is invoked as returning
+        // `void`: kotlinc coerces its value to `Unit`, so no branch joins a value.
+        let keeps_value = discarded
+            && keeps_discarded_value(exhaustive, result_ty)
+            && !branches
+                .iter()
+                .any(|(_, body)| self.ends_in_polymorphic_call(*body));
         let is_stmt = is_stmt && !keeps_value;
         let terminal_target = is_stmt.then_some(enclosing_terminal_target).flatten();
         // A `when` comparing ONE Int, Char or String local against constants is a JVM switch in kotlinc, not a chain

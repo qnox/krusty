@@ -579,6 +579,7 @@ impl LibraryCallable {
             deprecation: None,
             external_identity: None,
             annotations: Vec::new(),
+            signature_polymorphic: false,
             external_default_provider: None,
             external_property_identity: None,
             declaration_owner: None,
