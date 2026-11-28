@@ -1199,7 +1199,7 @@ impl OverridingFunction {
         inputs: &[Ty],
         applied: &FunctionInfo,
     ) -> bool {
-        let applied_inputs = applied.semantic_params();
+        let applied_inputs = crate::symbol_resolver::inherited_override_inputs(applied);
         let applied_formals = applied
             .generic_sig
             .as_ref()

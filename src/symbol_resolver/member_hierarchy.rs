@@ -142,13 +142,41 @@ pub(crate) fn function_input_shapes_match(
     if inherited.kind != implementation.kind {
         return false;
     }
-    let inherited_params = inherited.semantic_params();
+    let inherited_params = inherited_override_inputs(inherited);
     let implementation_params = implementation.semantic_params();
     override_input_shapes_match(
         source,
         function_override_input_shape(inherited, &inherited_params),
         function_override_input_shape(implementation, &implementation_params),
     )
+}
+
+/// The inputs of an inherited declaration as an override slot sees them: its receiver-specialized
+/// inputs, with the Java flexibility of a type variable written as a classifier argument retained.
+/// kotlinc matches `Class<out File?>` against `Class<? extends T>` with `T = File` because the
+/// inherited argument is `File!`. The specialized inputs stay the single source of the slot; the
+/// declared inputs only say where a flexible variable stood.
+pub(crate) fn inherited_override_inputs(inherited: &FunctionInfo) -> std::borrow::Cow<'_, [Ty]> {
+    let specialized = inherited.semantic_params();
+    match inherited.source_inputs.as_deref() {
+        Some(declaration) if declaration.signature.params.len() == specialized.len() => {
+            std::borrow::Cow::Owned(
+                declaration
+                    .signature
+                    .params
+                    .iter()
+                    .zip(specialized.iter())
+                    .map(|(declared, specialized)| {
+                        super::member_specialization::retain_flexible_type_arguments(
+                            *declared,
+                            *specialized,
+                        )
+                    })
+                    .collect(),
+            )
+        }
+        _ => specialized,
+    }
 }
 
 /// Whether two declarations occupy the same semantic or provider-normalized override input slot.
