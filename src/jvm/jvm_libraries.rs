@@ -16,6 +16,7 @@ mod collection_canonicalization;
 mod declaration_headers;
 mod declared_members;
 mod facade_package_callables;
+mod mapped_builtin_faces;
 mod symbol_source;
 use classpath_annotation_classes::{
     annotation_element_defaults, classpath_annotation_targets, java_annotation_parameter_list,
@@ -1044,49 +1045,6 @@ impl JvmLibraries {
         let kotlin = crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_with_members_name(internal)
             .unwrap_or(internal);
         self.cp.builtin_members_name(kotlin)
-    }
-
-    /// Metadata declarations realized by the mapped collection interfaces in a concrete JVM class's
-    /// hierarchy. The provider walks the physical hierarchy only to discover applied interfaces; the
-    /// member set and Kotlin inheritance come from `.kotlin_builtins`.
-    fn mapped_collection_members(&self, internal: TypeName) -> Vec<MappedBuiltinMember> {
-        let mut mappings = Vec::new();
-        let mut seen = crate::fx_hash::HashSet::default();
-        let mut pending = std::collections::VecDeque::new();
-        pending.push_back(super::jvm_class_map::to_jvm_type_name(internal));
-        while let Some(owner) = pending.pop_front() {
-            if !seen.insert(owner) {
-                continue;
-            }
-            if let Some(kotlin) =
-                super::jvm_class_map::jvm_collection_to_kotlin_mutable_type_name(owner)
-            {
-                for mapping in self.cp.mapped_builtin_members_name(kotlin) {
-                    if mapping.physical_owner != owner {
-                        continue;
-                    }
-                    if !mappings.contains(&mapping) {
-                        mappings.push(mapping);
-                    }
-                }
-            }
-            if let Some(class) = self.cp.find_name(owner) {
-                pending.extend(class.interfaces.iter_ids().chain(class.super_class));
-            }
-        }
-        mappings
-    }
-
-    /// Kotlin source renames for function members only. Property mappings are consumed separately
-    /// by `declared_callables_for`, where they become `PropertyInfo` declarations backed by the
-    /// concrete class's physical zero-argument method.
-    fn mapped_collection_function_renames(&self, internal: TypeName) -> Vec<MappedBuiltinMember> {
-        self.mapped_collection_members(internal)
-            .into_iter()
-            .filter(|mapping| {
-                !mapping.is_property() && mapping.source_name != mapping.physical_name
-            })
-            .collect()
     }
 
     /// The generic signature for `owner.jvm_name`, metadata-primary. When `@Metadata` DESCRIBES this
