@@ -156,6 +156,7 @@ pub(super) fn materialize_top_level_delegate(
         .set_value
         .as_ref()
         .map(|set_value| {
+            let setter_body = ir.exprs.len();
             let receiver = delegate_storage_read(
                 ir,
                 IrExpr::GetStatic(delegate_static),
@@ -181,9 +182,10 @@ pub(super) fn materialize_top_level_delegate(
                     (value, property.ty),
                 ],
             )?;
+            at_property_line(ir, setter_body, write, property.decl_line);
             Ok(add_accessor_function(
                 ir,
-                AccessorFunctionInput::setter(
+                AccessorFunctionInput::delegated_setter(
                     crate::names::property_setter_name(&property.name),
                     extension_receiver
                         .into_iter()
@@ -369,6 +371,7 @@ pub(super) fn materialize_member_delegate(
         .set_value
         .as_ref()
         .map(|set_value| {
+            let setter_body = ir.exprs.len();
             let this_ref = ir.add_expr(IrExpr::GetValue(0));
             let receiver = delegate_storage_read(
                 ir,
@@ -395,9 +398,10 @@ pub(super) fn materialize_member_delegate(
                     (value, property.ty),
                 ],
             )?;
+            at_property_line(ir, setter_body, write, property.decl_line);
             Ok(add_accessor_function(
                 ir,
-                AccessorFunctionInput::setter(
+                AccessorFunctionInput::delegated_setter(
                     crate::names::property_setter_name(&property.name),
                     vec![property.ty],
                     write,
@@ -641,6 +645,7 @@ pub(super) fn materialize_member_extension_delegate(
         .set_value
         .as_ref()
         .map(|set_value| {
+            let setter_body = ir.exprs.len();
             let dispatch = ir.add_expr(IrExpr::GetValue(0));
             let delegate = delegate_storage_read(
                 ir,
@@ -667,9 +672,10 @@ pub(super) fn materialize_member_extension_delegate(
                     (value, property.ty),
                 ],
             )?;
+            at_property_line(ir, setter_body, write, property.decl_line);
             Ok(add_accessor_function(
                 ir,
-                AccessorFunctionInput::setter(
+                AccessorFunctionInput::delegated_setter(
                     crate::names::property_setter_name(&property.name),
                     vec![extension_receiver, property.ty],
                     write,
@@ -838,7 +844,7 @@ fn push_delegate_static(
 /// reports it: the external arms have no callable identity to name, and `property`
 /// is not a spare sentinel — it is whichever declaration was allocated first, so a failure here used
 /// to be attributed to an unrelated one.
-/// kotlinc states a delegated getter's convention call at the property's line, the call site an
+/// kotlinc states a delegated accessor's convention call at the property's line, the call site an
 /// inlined operator's lines are mapped against.
 ///
 /// fir2ir builds the whole generated accessor body at the property's offsets, so every node built
