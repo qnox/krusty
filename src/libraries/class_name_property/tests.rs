@@ -97,3 +97,50 @@ fn class_name_getters_require_archive_authority_and_the_exact_declaration() {
     realize_class_name_property(wk::kclass(), true, &mut other_member);
     assert_eq!(other_member.getter.compiler_intrinsic, None);
 }
+
+fn is_instance_function() -> crate::libraries::FunctionInfo {
+    let any = Ty::nullable(Ty::obj_name(wk::any()));
+    let mut callable = crate::libraries::LibraryCallable::library(
+        wk::kclass(),
+        "isInstance",
+        vec![any],
+        Ty::Boolean,
+        Ty::Boolean,
+        "(Ljava/lang/Object;)Z",
+    );
+    callable.params = vec![any];
+    let mut function = crate::libraries::FunctionInfo::plain(
+        crate::libraries::FnKind::Member,
+        Some(Ty::obj_name(wk::kclass())),
+        callable,
+    );
+    function.flags.is_abstract = true;
+    function
+}
+
+#[test]
+fn is_instance_requires_archive_authority_and_the_exact_declaration() {
+    let original = is_instance_function();
+    let mut trusted = original.clone();
+    super::realize_class_is_instance(wk::kclass(), true, &mut trusted);
+    assert_eq!(
+        trusted.callable.compiler_intrinsic,
+        Some(CompilerIntrinsic::ClassIsInstance)
+    );
+    let mut untrusted = original.clone();
+    super::realize_class_is_instance(wk::kclass(), false, &mut untrusted);
+    assert_eq!(untrusted.callable.compiler_intrinsic, None);
+    let mut other_owner = original.clone();
+    super::realize_class_is_instance(type_name("user/KClass"), true, &mut other_owner);
+    assert_eq!(other_owner.callable.compiler_intrinsic, None);
+    let mut renamed = original.clone();
+    renamed.callable.name = "isInstanceOf".into();
+    let mut wrong_result = original.clone();
+    wrong_result.callable.ret = Ty::Int;
+    let mut concrete = original;
+    concrete.flags.is_abstract = false;
+    for mut function in [renamed, wrong_result, concrete] {
+        super::realize_class_is_instance(wk::kclass(), true, &mut function);
+        assert_eq!(function.callable.compiler_intrinsic, None);
+    }
+}

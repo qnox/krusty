@@ -122,7 +122,7 @@ use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
 use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TyKind, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
-pub(crate) use class_name_property::realize_class_name_property;
+pub(crate) use class_name_property::{realize_class_is_instance, realize_class_name_property};
 pub use compiler_intrinsic::{
     AdjacentDirection, AtomicOperation, CharArrayRange, ClassNameKind, CompilerIntrinsic,
     IndicesReceiver, ListStorageConstruction, ResultFailureIntrinsic, SurrogateHalf,
