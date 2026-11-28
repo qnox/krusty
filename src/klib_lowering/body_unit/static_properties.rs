@@ -181,6 +181,7 @@ impl Linker<'_, '_> {
             accessor_lines: crate::ir::IrAccessorLines::default(),
             source_order: u32::MAX,
             property_delegate: false,
+            deferred: false,
         });
         self.statics.insert(identity, index);
         Ok(Some(StaticField {
@@ -265,6 +266,7 @@ impl Linker<'_, '_> {
             accessor_lines: crate::ir::IrAccessorLines::default(),
             source_order: u32::MAX,
             property_delegate: false,
+            deferred: false,
         });
         let header = super::super::function_lowering::initialization_header("initializeFile");
         let initialization = super::super::function_lowering::declare_function(ir, &header);

@@ -54,6 +54,7 @@ mod callee;
 mod cast_targets;
 mod catches;
 mod checked_types;
+mod class_activation;
 mod companion_blocks;
 mod compiled_inline_calls;
 pub use compiled_inline_calls::{CompiledInlineOperands, SameModuleInlining};
@@ -159,6 +160,7 @@ pub use bridges::{
 };
 pub use callee::{Callee, IrSuperCallKind, IrVirtualTarget, ValueClassAdapter};
 pub use catches::IrCatch;
+pub use class_activation::IrClassActivationStep;
 pub use companion_blocks::{IrCompanionBlockProperty, IrCompanionBlocks, IrStaticPlacement};
 pub use constants::IrConst;
 pub use constructors::IrSecondaryConstructorRole;
@@ -1195,6 +1197,8 @@ pub struct IrClass {
     /// `Some(companion_fq)` on a class with a `companion object`: emit a `public static final
     /// <companion> Companion` field, initialized in this class's `<clinit>`.
     pub companion_class: Option<TypeName>,
+    /// What initializing this class initializes, in order ([`IrClassActivationStep`]).
+    pub activation: Box<[IrClassActivationStep]>,
     /// Kotlin names of compiler-generated classifiers this class publishes as direct nested
     /// declarations, in declaration order. Source-declared nested classifiers are represented by
     /// their own [`IrClass`] ownership; this list is only for generated declarations whose producer

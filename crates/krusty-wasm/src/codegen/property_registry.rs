@@ -72,11 +72,23 @@ pub(super) struct PropertyRegistry {
     module: HashMap<PropertyId, TopLevelProperty>,
     members: HashMap<PropertyId, MemberProperty>,
     accessors: HashMap<PropertyId, AccessorProperty>,
-    /// The function that activates one class, by the class: its superclasses, superinterfaces,
-    /// own statics and companions, as an access in its own file does. A file reading a
-    /// `companion { }` block property another file declares calls it first, so it is reserved by
-    /// whichever file needs it first and defined by the file that declares the class.
-    owner_activations: HashMap<TypeName, u32>,
+    /// The functions through which one file reaches a step of initializing a class another file
+    /// declares, by the class and the entry. Each is reserved by whichever file needs it first and
+    /// defined by the file that declares the class.
+    class_entries: HashMap<(TypeName, ClassEntry), u32>,
+}
+
+/// A function that initializes part of one class, which another file of the module calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum ClassEntry {
+    /// The class's whole activation, as an access in its own file runs it: superclasses,
+    /// superinterfaces, its own statics and its companion. A file reading a `companion { }` block
+    /// property another file declares calls it first.
+    Activation,
+    /// The class's own statics, at most once.
+    OwnStatics,
+    /// The class's companion object.
+    Companion,
 }
 
 impl PropertyRegistry {
@@ -90,7 +102,7 @@ impl PropertyRegistry {
                 self.module.clear();
                 self.members.clear();
                 self.accessors.clear();
-                self.owner_activations.clear();
+                self.class_entries.clear();
             }
         }
     }
@@ -335,23 +347,30 @@ impl PropertyRegistry {
         Ok(entry)
     }
 
-    /// The activation function of `owner`, reserving it with `declare` when no file has.
-    pub(super) fn owner_activation(
+    /// The `entry` function of `owner`, reserving it with `declare` when no file has.
+    pub(super) fn class_entry(
         &mut self,
         owner: TypeName,
+        entry: ClassEntry,
         declare: impl FnOnce() -> u32,
     ) -> u32 {
-        *self.owner_activations.entry(owner).or_insert_with(declare)
+        *self
+            .class_entries
+            .entry((owner, entry))
+            .or_insert_with(declare)
     }
 
-    pub(super) fn reserved_owner_activation(&self, owner: TypeName) -> Option<u32> {
-        self.owner_activations.get(&owner).copied()
+    pub(super) fn reserved_class_entry(&self, owner: TypeName, entry: ClassEntry) -> Option<u32> {
+        self.class_entries.get(&(owner, entry)).copied()
     }
 
-    pub(super) fn reserved_owner_activations(&self) -> impl Iterator<Item = (TypeName, u32)> + '_ {
-        self.owner_activations
+    /// Every entry some file reserved, with the class it belongs to.
+    pub(super) fn reserved_class_entries(
+        &self,
+    ) -> impl Iterator<Item = (TypeName, ClassEntry, u32)> + '_ {
+        self.class_entries
             .iter()
-            .map(|(owner, function)| (*owner, *function))
+            .map(|(&(owner, entry), &function)| (owner, entry, function))
     }
 
     pub(super) fn accessor(&self, property: PropertyId) -> Option<AccessorProperty> {
@@ -475,7 +494,7 @@ impl PropertyRegistry {
                 reference.placement,
                 reference.flags.has(DeclarationFlags::CONST),
             ) {
-                self.owner_activation(declaring_class, || module.declare());
+                self.class_entry(declaring_class, ClassEntry::Activation, || module.declare());
             }
         }
         Ok(globals)

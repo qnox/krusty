@@ -26,6 +26,7 @@ mod call_target_tests;
 mod char_sequence_loops;
 mod checked;
 mod checked_arguments;
+mod class_activation;
 mod classifier_references;
 mod companion_blocks;
 mod constant_evaluation;

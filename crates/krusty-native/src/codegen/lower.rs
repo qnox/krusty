@@ -452,6 +452,7 @@ pub fn lower_file(
     lowering.define_property_entry_points(file_init)?;
     lowering.define_value_box_entry_points()?;
     lowering.define_extension_entries(file_init)?;
+    lowering.define_class_activation_entries(file_init)?;
     let defines_entry = selected.is_some();
     let abi = match unit_kind {
         krusty::backend::CheckedIrUnitKind::Source => {

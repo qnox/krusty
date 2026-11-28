@@ -5,8 +5,10 @@
 //! `kt_classinit_<class>`, which runs its statics in declaration order behind a once-only flag,
 //! and each activation point the plan names calls it.
 
+use super::super::super::symbols::{module_class_activation_symbol, ClassActivationEntry};
 use super::*;
-use krusty::backend::class_statics::{ClassActivationStep, ClassStaticPlan};
+use krusty::backend::class_statics::ClassStaticPlan;
+use krusty::ir::IrClassActivationStep;
 
 /// A file's class static plan, and the emitted initializer of each class it gives statics.
 pub(super) struct FileClassStatics {
@@ -144,72 +146,147 @@ impl<'a> FileLowering<'a> {
     }
 }
 
-impl BodyLowering<'_, '_, '_> {
-    /// Initialize `class` the way `new` does, before any constructor argument runs.
-    ///
-    /// A superclass's companion runs before the subclass's. The singleton getter is the
-    /// typed initializer and publishes the instance before the companion constructor, so a
-    /// companion that constructs its holder does not re-enter. An enum's companion stays
-    /// with the enum initializer.
-    pub(super) fn activate_class(&mut self, class: ClassId) -> Result<(), Unsupported> {
-        let mut chain = vec![class];
-        loop {
-            let parent = self
-                .file
-                .model
-                .layout(*chain.last().expect("non-empty"))
-                .superclass;
-            let Some(parent) = parent else {
-                break;
-            };
-            chain.push(parent);
-        }
-        self.activate_laid_out_superclass(*chain.last().expect("non-empty"))?;
-        if self.terminated {
+impl FileLowering<'_> {
+    /// The singleton getter of `class`'s companion object, which this file declares with it.
+    fn companion_getter(&self, class: ClassId) -> Result<FuncId, Unsupported> {
+        let declaration = &self.ir.classes[class as usize];
+        declaration
+            .companion_class
+            .and_then(|companion| self.ir.class_id_by_name(companion))
+            .and_then(|companion| self.classes[companion as usize].singleton)
+            .map(|(_, getter)| getter)
+            .ok_or_else(|| {
+                declined!(
+                    "the companion object of `{}` outside its file",
+                    declaration.fq_name()
+                )
+            })
+    }
+
+    /// Define the entries another file of the module calls for a step of initializing a class of
+    /// this one: its own statics, and its companion. Each runs this file's initializer first, as
+    /// every entry into the file does.
+    pub(super) fn define_class_activation_entries(
+        &mut self,
+        file_init: FuncId,
+    ) -> Result<(), Unsupported> {
+        if self.unit_kind != krusty::backend::CheckedIrUnitKind::Source {
             return Ok(());
         }
-        for &owner in chain.iter().rev() {
-            for step in self.file.class_statics.plan.activation_steps(owner) {
-                match step {
-                    ClassActivationStep::OwnStatics(class) => self.initialize_own_statics(class)?,
-                    ClassActivationStep::Companion(class) => self.initialize_companion(class)?,
+        let ir = self.ir;
+        for class in 0..ir.classes.len() {
+            let class = class as ClassId;
+            if krusty::backend::is_declared_in_executable_code(ir, class) {
+                continue;
+            }
+            let declaration = &ir.classes[class as usize];
+            for &step in declaration.activation.iter() {
+                let (entry, target) = match step {
+                    IrClassActivationStep::OwnStatics(owner) if owner == declaration.fq_name => {
+                        let initializer =
+                            self.class_statics.initializers.get(&class).ok_or_else(|| {
+                                declined!(
+                                    "the statics of `{}` without an initializer",
+                                    declaration.fq_name()
+                                )
+                            })?;
+                        (ClassActivationEntry::Statics, initializer.function)
+                    }
+                    IrClassActivationStep::Companion(owner) if owner == declaration.fq_name => (
+                        ClassActivationEntry::Companion,
+                        self.companion_getter(class)?,
+                    ),
+                    _ => continue,
+                };
+                let symbol =
+                    module_class_activation_symbol(self.module_name, declaration.fq_name, entry);
+                let signature = self.signature_of(&[], Ty::Unit)?;
+                let function = self
+                    .module
+                    .declare_function(&symbol, Linkage::Hidden, &signature)
+                    .map_err(|error| declined!("declaring `{symbol}` ({error})"))?;
+                self.emit_function(function, signature, Ty::Unit, &symbol, &mut |body, _| {
+                    let init = body.func_ref(file_init);
+                    body.emit_call(init, &[])?;
+                    if body.terminated {
+                        return Ok(());
+                    }
+                    let target = body.func_ref(target);
+                    body.emit_call(target, &[])?;
+                    Ok(())
+                })?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl BodyLowering<'_, '_, '_> {
+    /// Initialize `class` the way `new` does, before any constructor argument runs: each step of
+    /// its recorded activation.
+    ///
+    /// A companion is initialized through its singleton getter, which publishes the instance
+    /// before the companion constructor, so a companion that constructs its holder does not
+    /// re-enter.
+    pub(super) fn activate_class(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        let steps = self.file.ir.classes[class as usize].activation.clone();
+        for &step in steps.iter() {
+            match step {
+                IrClassActivationStep::OwnStatics(owner) => self.run_class_statics(owner)?,
+                IrClassActivationStep::Companion(owner) => self.initialize_companion(owner)?,
+                IrClassActivationStep::Dependency(superclass) => {
+                    self.activate_dependency_superclass(superclass)?;
                 }
-                if self.terminated {
-                    return Ok(());
-                }
+            }
+            if self.terminated {
+                return Ok(());
             }
         }
         Ok(())
     }
 
-    /// Initialize the companion object of `class`, when it has one: through its singleton
-    /// getter. An enum's companion stays with the enum initializer.
-    fn initialize_companion(&mut self, class: ClassId) -> Result<(), Unsupported> {
-        let getter = {
-            let ir = self.file.ir;
-            let classes = &self.file.classes;
-            let declaration = &ir.classes[class as usize];
-            if model::is_enum(declaration) {
-                None
-            } else {
-                declaration
-                    .companion_class
-                    .and_then(|companion| ir.class_id_by_name(companion))
-                    .and_then(|companion| classes[companion as usize].singleton)
-                    .map(|(_, getter)| getter)
-            }
+    /// Run `owner`'s own statics: this file's initializer of it, or the entry the file that
+    /// declares it defines.
+    fn run_class_statics(&mut self, owner: TypeName) -> Result<(), Unsupported> {
+        match self.file.ir.class_id_by_name(owner) {
+            Some(class) => self.initialize_own_statics(class),
+            None => self.call_activation_entry(owner, ClassActivationEntry::Statics),
+        }
+    }
+
+    /// Initialize `owner`'s companion object: through its singleton getter when this file
+    /// declares it, else through the entry the declaring file defines.
+    fn initialize_companion(&mut self, owner: TypeName) -> Result<(), Unsupported> {
+        let Some(class) = self.file.ir.class_id_by_name(owner) else {
+            return self.call_activation_entry(owner, ClassActivationEntry::Companion);
         };
-        let Some(getter) = getter else {
-            return Ok(());
-        };
+        let getter = self.file.companion_getter(class)?;
         let func_ref = self.func_ref(getter);
+        self.emit_call(func_ref, &[])?;
+        Ok(())
+    }
+
+    fn call_activation_entry(
+        &mut self,
+        owner: TypeName,
+        entry: ClassActivationEntry,
+    ) -> Result<(), Unsupported> {
+        let symbol = module_class_activation_symbol(self.file.module_name, owner, entry);
+        let function = self.file.import(&symbol, &[], Ty::Unit)?;
+        let func_ref = self.func_ref(function);
         self.emit_call(func_ref, &[])?;
         Ok(())
     }
 
     /// Run `class`'s own statics here unless they already ran.
     pub(super) fn initialize_own_statics(&mut self, class: ClassId) -> Result<(), Unsupported> {
-        let function = self.file.class_statics.initializers[&class].function;
+        let function = self
+            .file
+            .class_statics
+            .initializers
+            .get(&class)
+            .ok_or_else(|| declined!("class statics without an initializer"))?
+            .function;
         let func_ref = self.func_ref(function);
         self.emit_call(func_ref, &[])?;
         Ok(())

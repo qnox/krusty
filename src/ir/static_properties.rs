@@ -95,6 +95,9 @@ pub struct IrStatic {
     pub source_order: u32,
     /// A delegated property's `x$delegate` storage: it holds the delegate, not a property value.
     pub property_delegate: bool,
+    /// The static waits for its class: its initializer runs when the class is initialized, not
+    /// with the file. Common lowering decides it.
+    pub deferred: bool,
 }
 
 impl IrStatic {

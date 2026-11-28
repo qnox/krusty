@@ -1,14 +1,17 @@
-//! The emitted form of a class's own statics.
+//! The emitted form of a class's activation.
 //!
-//! Which statics wait for their class, and what each activation point initializes, is
-//! [`ClassStaticPlan`]'s. Here each class of the plan gets one function that runs its statics in
-//! declaration order behind a once-only `i32` global, and each activation point the plan names
-//! calls it. Another file reaches a class of this one through the class's activation function,
-//! which initializes it the way an access in this file does: superclasses, superinterfaces and
-//! companions included.
+//! Which statics wait for their class, and what initializing each class initializes, are common
+//! lowering's facts, grouped by [`ClassStaticPlan`]. Here each class with statics of its own gets
+//! one function that runs them in declaration order behind a once-only `i32` global, and each
+//! activation point runs the class's recorded activation steps. A step for a class another file
+//! declares calls the function that file defines for it, reserved by class in the module's
+//! registry; another file reaching a class of this one does the same through the class's whole
+//! activation function.
 
 use super::*;
+use crate::codegen::property_registry::ClassEntry;
 use krusty::backend::class_statics::ClassStaticPlan;
+use krusty::ir::IrClassActivationStep;
 
 /// The emitted pieces of one class's static initialization.
 struct ClassInitializer {
@@ -18,17 +21,20 @@ struct ClassInitializer {
     flag: u32,
 }
 
-/// The plan of a file's class statics, and the initializer of each class it gives statics.
+/// The plan of a file's class statics, the initializer of each class it gives statics, and the
+/// entries this file defines for other files and calls in them.
 pub(super) struct ClassInitializers {
     plan: ClassStaticPlan,
     classes: HashMap<ClassId, ClassInitializer>,
-    /// The activation function of each class of this file another file can reach: every class
-    /// with statics, and every class another file reserved one for.
-    activations: Vec<(ClassId, u32)>,
+    /// The entries of this file's classes that this file defines: whole activations, companion
+    /// initializations and the own-statics entries of other files.
+    defined: Vec<(ClassId, ClassEntry, u32)>,
+    /// The entry of another file's class each step of this file's activations calls.
+    external: HashMap<(TypeName, ClassEntry), u32>,
 }
 
 impl ClassInitializers {
-    /// Plan the file's class statics and reserve each class's initializer.
+    /// Plan the file's class statics and reserve each class's initializer and entries.
     pub(super) fn declare(
         ir: &IrFile,
         module: &mut Module,
@@ -36,40 +42,71 @@ impl ClassInitializers {
     ) -> Result<Self, Unsupported> {
         let plan = ClassStaticPlan::new(ir)
             .map_err(|unordered| format!("a static property of `{}`", unordered.owner.render()))?;
-        let classes = plan
-            .classes()
-            .iter()
-            .map(|group| {
-                let initializer = ClassInitializer {
-                    function: module.declare(),
-                    flag: module.global(ValType::I32),
+        let mut classes = HashMap::default();
+        for group in plan.classes() {
+            let owner = ir.classes[group.class as usize].fq_name;
+            // The initializer is the entry another file calls for this class's statics.
+            let initializer = ClassInitializer {
+                function: properties
+                    .class_entry(owner, ClassEntry::OwnStatics, || module.declare()),
+                flag: module.global(ValType::I32),
+            };
+            classes.insert(group.class, initializer);
+        }
+        let mut defined = Vec::new();
+        let mut external = HashMap::default();
+        for (position, declaration) in ir.classes.iter().enumerate() {
+            let class = position as ClassId;
+            if krusty::backend::is_declared_in_executable_code(ir, class) {
+                continue;
+            }
+            for &step in declaration.activation.iter() {
+                let (owner, entry) = match step {
+                    IrClassActivationStep::OwnStatics(owner) => (owner, ClassEntry::OwnStatics),
+                    IrClassActivationStep::Companion(owner) => (owner, ClassEntry::Companion),
+                    IrClassActivationStep::Dependency(_) => continue,
                 };
-                (group.class, initializer)
+                if ir.class_id_by_name(owner).is_none() {
+                    let function = properties.class_entry(owner, entry, || module.declare());
+                    external.insert((owner, entry), function);
+                }
+            }
+            if declaration.activation.is_empty() {
+                continue;
+            }
+            let owner = declaration.fq_name;
+            // Every class whose initialization does anything can be reached from another file:
+            // through a block property or a subclass there.
+            let activation =
+                properties.class_entry(owner, ClassEntry::Activation, || module.declare());
+            defined.push((class, ClassEntry::Activation, activation));
+            if declaration
+                .activation
+                .contains(&IrClassActivationStep::Companion(owner))
+            {
+                let companion =
+                    properties.class_entry(owner, ClassEntry::Companion, || module.declare());
+                defined.push((class, ClassEntry::Companion, companion));
+            }
+        }
+        // A file lowered before this one may have reserved an entry of a class of this one that
+        // the loop above did not define.
+        let reserved: Vec<(ClassId, ClassEntry, u32)> = properties
+            .reserved_class_entries()
+            .filter_map(|(owner, entry, function)| {
+                Some((ir.class_id_by_name(owner)?, entry, function))
             })
-            .collect();
-        // A file that reads a class's statics before this file is lowered reserved its
-        // activation function, which this file defines.
-        let mut activations: Vec<(ClassId, u32)> = plan
-            .classes()
-            .iter()
-            .map(|group| {
-                let owner = ir.classes[group.class as usize].fq_name;
-                (
-                    group.class,
-                    properties.owner_activation(owner, || module.declare()),
-                )
+            .filter(|&(class, entry, _)| {
+                entry != ClassEntry::OwnStatics || !classes.contains_key(&class)
             })
+            .filter(|reserved| !defined.contains(reserved))
             .collect();
-        activations.extend(
-            properties
-                .reserved_owner_activations()
-                .filter_map(|(owner, function)| Some((ir.class_id_by_name(owner)?, function)))
-                .filter(|(class, _)| !plan.has_statics(*class)),
-        );
+        defined.extend(reserved);
         Ok(Self {
             plan,
             classes,
-            activations,
+            defined,
+            external,
         })
     }
 
@@ -77,7 +114,16 @@ impl ClassInitializers {
         &self.plan
     }
 
-    /// Define every class initializer [`Self::declare`] reserved.
+    /// The function that initializes `class` the way constructing it does, when its
+    /// initialization does anything.
+    pub(super) fn activation_function(&self, class: ClassId) -> Option<u32> {
+        self.defined
+            .iter()
+            .find(|&&(owner, entry, _)| owner == class && entry == ClassEntry::Activation)
+            .map(|&(_, _, function)| function)
+    }
+
+    /// Define every class initializer and entry [`Self::declare`] reserved.
     pub(super) fn define(
         &self,
         context: &FileContext<'_>,
@@ -111,10 +157,15 @@ impl ClassInitializers {
             let Body { code, locals, .. } = body;
             module.define(initializer.function, Function { ty, locals, code });
         }
-        for &(class, function) in &self.activations {
+        for &(class, entry, function) in &self.defined {
             let ty = module.func_type(Vec::new(), Vec::new());
             let mut body = Body::new(context, module, runtime, &[], Default::default(), Ty::Unit);
-            body.activate_class(class, None)?;
+            match entry {
+                ClassEntry::Activation => body.activate_class(class, None)?,
+                ClassEntry::Companion => body.initialize_companion(class)?,
+                // Another file expected statics this class does not run: nothing to do.
+                ClassEntry::OwnStatics => {}
+            }
             let Body { code, locals, .. } = body;
             module.define(function, Function { ty, locals, code });
         }
@@ -123,16 +174,64 @@ impl ClassInitializers {
 }
 
 impl Body<'_> {
+    /// Initialize `class` the way `new` does, before any constructor argument runs: each step of
+    /// its recorded activation.
+    ///
+    /// Each class's companion goes through the singleton getter, which publishes the instance
+    /// before the companion constructor, so a companion that constructs its holder does not
+    /// re-enter. `initializing` is a class whose companion's initialization is already in
+    /// progress, so activation does not start it again.
+    pub(super) fn activate_class(
+        &mut self,
+        class: ClassId,
+        initializing: Option<ClassId>,
+    ) -> Result<(), Unsupported> {
+        for &step in self.ir.classes[class as usize].activation.iter() {
+            match step {
+                IrClassActivationStep::OwnStatics(owner) => match self.ir.class_id_by_name(owner) {
+                    Some(owner) => self.initialize_own_statics(owner)?,
+                    None => self.call_external(owner, ClassEntry::OwnStatics)?,
+                },
+                IrClassActivationStep::Companion(owner) => match self.ir.class_id_by_name(owner) {
+                    Some(owner) if Some(owner) == initializing => {}
+                    Some(owner) => self.initialize_companion(owner)?,
+                    None => self.call_external(owner, ClassEntry::Companion)?,
+                },
+                IrClassActivationStep::Dependency(superclass) => {
+                    self.activate_dependency_superclass(superclass)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn call_external(&mut self, owner: TypeName, entry: ClassEntry) -> Result<(), Unsupported> {
+        let function = self
+            .class_initializers
+            .external
+            .get(&(owner, entry))
+            .copied()
+            .ok_or_else(|| format!("an unreserved initialization entry of `{}`", owner.render()))?;
+        self.code.call(function);
+        Ok(())
+    }
+
     /// Run `class`'s own statics here unless they already ran.
-    pub(super) fn initialize_own_statics(&mut self, class: ClassId) {
-        self.code
-            .call(self.class_initializers.classes[&class].function);
+    pub(super) fn initialize_own_statics(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        let initializer = self
+            .class_initializers
+            .classes
+            .get(&class)
+            .ok_or("class statics without an initializer")?;
+        self.code.call(initializer.function);
+        Ok(())
     }
 
     /// The constructor entry of `class`: its own statics, when the plan gives it any.
-    pub(super) fn enter_constructor(&mut self, class: ClassId) {
-        if let Some(class) = self.class_initializers.plan.constructor_entry(class) {
-            self.initialize_own_statics(class);
+    pub(super) fn enter_constructor(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        match self.class_initializers.plan.constructor_entry(class) {
+            Some(class) => self.initialize_own_statics(class),
+            None => Ok(()),
         }
     }
 
@@ -159,9 +258,10 @@ impl Body<'_> {
                             }
                             krusty::ir::IrStaticPlacement::Package => None,
                         });
-                if let Some(function) =
-                    owner.and_then(|owner| self.properties.reserved_owner_activation(owner))
-                {
+                if let Some(function) = owner.and_then(|owner| {
+                    self.properties
+                        .reserved_class_entry(owner, ClassEntry::Activation)
+                }) {
                     self.code.call(function);
                 }
                 Ok(())

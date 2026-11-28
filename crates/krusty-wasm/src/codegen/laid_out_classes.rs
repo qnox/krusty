@@ -106,7 +106,8 @@ pub(super) struct LaidOutClass {
     /// Every method of it and its superclasses that has a body, by identity: its function and that
     /// function's type, which a `super` call of a subclass calls directly.
     pub(super) methods: HashMap<CallableId, (u32, u32)>,
-    /// The getters of the companions constructing an instance initializes first, root first.
+    /// The function that initializes the class as constructing an instance does first; empty
+    /// when that initializes nothing.
     pub(super) activation: Vec<u32>,
     /// What the shared class tables read of it.
     pub(super) table: LaidOutSuperclass,

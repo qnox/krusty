@@ -444,6 +444,7 @@ pub(super) fn lower_companion_properties(
             // kotlinc's hoisted field is a new declaration, not the delegate storage it moved:
             // it keeps its generic `Signature`.
             property_delegate: false,
+            deferred: false,
         });
         // Deliberately NOT registered in `declared_class_statics`: that table feeds the owner's
         // `@Metadata` const-property records, and kotlinc's owner metadata has NO record for a

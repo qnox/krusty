@@ -686,13 +686,14 @@ impl FileLowering<'_> {
 }
 
 impl BodyLowering<'_, '_, '_> {
-    /// Call the activation entry of the superclass an earlier file laid out for `class`, which
-    /// runs before the companions of `class` and its superclasses in this file.
-    pub(in super::super) fn activate_laid_out_superclass(
+    /// Call the activation entry another module publishes for `superclass`, which initializes it
+    /// and its own superclasses. A superclass whose module publishes no laid-out record (a
+    /// library class with nothing of its own to initialize) has no entry to call.
+    pub(in super::super) fn activate_dependency_superclass(
         &mut self,
-        root: ClassId,
+        superclass: TypeName,
     ) -> Result<(), Unsupported> {
-        let Some(record) = self.file.laid_out_superclass(root) else {
+        let Some(record) = self.file.laid_out.get(superclass) else {
             return Ok(());
         };
         let activation = record.activation.clone();

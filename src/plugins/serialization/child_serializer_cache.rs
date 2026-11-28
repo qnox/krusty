@@ -265,6 +265,7 @@ pub(super) fn add_child_serializer_cache(
                 accessor_lines: crate::ir::IrAccessorLines::default(),
                 source_order: u32::MAX,
                 property_delegate: false,
+                deferred: false,
             });
             return None;
         }
@@ -382,6 +383,7 @@ pub(super) fn add_child_serializer_cache(
             accessor_lines: crate::ir::IrAccessorLines::default(),
             source_order: u32::MAX,
             property_delegate: false,
+            deferred: false,
         });
         // Only a `$serializer` reads the cache from outside the class.
         let accessor = ir

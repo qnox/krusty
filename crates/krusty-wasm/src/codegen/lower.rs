@@ -436,8 +436,11 @@ pub(super) fn lower_file(
         for (name, record) in classes.records(
             module,
             ir,
-            &indices,
-            &signatures,
+            super::classes::RecordedFunctions {
+                functions: &indices,
+                signatures: &signatures,
+                activation_of: &|class| class_initializers.activation_function(class),
+            },
             dependency_exports,
             callables,
         )? {

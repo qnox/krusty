@@ -66,6 +66,7 @@ fn reserve_target(ir: &mut IrFile, class: &ParcelizedClass) -> ParcelTarget {
         accessor_lines: crate::ir::IrAccessorLines::default(),
         source_order: u32::MAX,
         property_delegate: false,
+        deferred: false,
     });
     ParcelTarget {
         name,

@@ -246,6 +246,7 @@ mod tests {
             accessor_lines: krusty::ir::IrAccessorLines::default(),
             source_order: 0,
             property_delegate: false,
+            deferred: false,
         });
         let declaration = ir.add_expr(IrExpr::SetStatic {
             index: 0,

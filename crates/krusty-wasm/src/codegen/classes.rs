@@ -302,6 +302,15 @@ pub(super) struct FileClasses {
     realized: Vec<[bool; ANY_SLOTS as usize]>,
 }
 
+/// The functions of a file a laid-out record names: each function's index and type by `FunId`,
+/// and the activation function of each class whose initialization does anything.
+#[derive(Clone, Copy)]
+pub(super) struct RecordedFunctions<'a> {
+    pub(super) functions: &'a [Option<u32>],
+    pub(super) signatures: &'a [Option<u32>],
+    pub(super) activation_of: &'a dyn Fn(ClassId) -> Option<u32>,
+}
+
 impl FileClasses {
     /// The function type a call through `slot` of `class` takes.
     pub(super) fn slot_type(&self, class: ClassId, slot: u32) -> Option<u32> {
@@ -371,11 +380,15 @@ impl FileClasses {
         &self,
         module: &mut Module,
         ir: &IrFile,
-        functions: &[Option<u32>],
-        signatures: &[Option<u32>],
+        file: RecordedFunctions<'_>,
         exports: &krusty::backend::DependencyExportSignatures,
         frozen: &krusty::backend::CheckedBackendCallables,
     ) -> Result<Vec<(TypeName, LaidOutClass)>, Unsupported> {
+        let RecordedFunctions {
+            functions,
+            signatures,
+            activation_of,
+        } = file;
         let callables: HashMap<FunId, CallableId> = ir
             .checked_callable_functions
             .iter()
@@ -445,26 +458,7 @@ impl FileClasses {
                 };
                 *slot = Some(identity.clone());
             }
-            let mut activation = self
-                .laid_out_superclass(id)
-                .map(|superclass| superclass.activation.clone())
-                .unwrap_or_default();
-            for &owner in chain.iter().rev() {
-                let declaration = &ir.classes[owner as usize];
-                // As construction initializes them: an enum's companion is the enum's own.
-                if declaration.is_enum || declaration.is_enum_entry {
-                    continue;
-                }
-                let companion = declaration
-                    .companion_class
-                    .and_then(|companion| ir.class_id_by_name(companion));
-                if let Some(getter) = companion
-                    .and_then(|companion| self.forms[companion as usize].singleton)
-                    .map(|singleton| singleton.getter)
-                {
-                    activation.push(getter);
-                }
-            }
+            let activation: Vec<u32> = activation_of(id).into_iter().collect();
             let mut methods = self
                 .laid_out_superclass(id)
                 .map(|superclass| superclass.methods.clone())
