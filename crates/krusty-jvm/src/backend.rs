@@ -2185,6 +2185,7 @@ mod tests {
             accessor_lines: krusty::ir::IrAccessorLines::default(),
             source_order: 0,
             property_delegate: false,
+            deferred: false,
         });
         ir.local_property_layouts.insert(
             property_id,

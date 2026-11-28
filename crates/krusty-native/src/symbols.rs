@@ -198,7 +198,7 @@ pub(super) struct Symbols {
     pub cross_file: Vec<bool>,
 }
 
-fn class_symbol_family(base: &str) -> [String; 6] {
+fn class_symbol_family(base: &str) -> [String; 8] {
     [
         format!("kt_type_{base}"),
         format!("kt_vtable_{base}"),
@@ -206,7 +206,35 @@ fn class_symbol_family(base: &str) -> [String; 6] {
         format!("kt_{base}__init"),
         format!("kt_singleton_{base}"),
         format!("kt_singleton_{base}_get"),
+        format!("kt_{base}__statics"),
+        format!("kt_{base}__companion"),
     ]
+}
+
+/// One step of initializing a class, as another file of the module reaches it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ClassActivationEntry {
+    /// Runs the class's own statics.
+    Statics,
+    /// Initializes the class's companion object.
+    Companion,
+}
+
+/// Symbol of the entry another file of the module calls for one step of initializing `class`.
+///
+/// Like [`module_function_symbol`], both files derive it from the module and the class's
+/// resolved identity, so neither needs the other's lowering to agree on it.
+pub(super) fn module_class_activation_symbol(
+    module_name: &str,
+    class: krusty::types::TypeName,
+    entry: ClassActivationEntry,
+) -> String {
+    // Boundary conversion: a symbol spelling.
+    let base = module_class_symbol_base(module_name, &class.render());
+    match entry {
+        ClassActivationEntry::Statics => format!("kt_{base}__statics"),
+        ClassActivationEntry::Companion => format!("kt_{base}__companion"),
+    }
 }
 
 /// Collision-free base of every symbol owned by a source class.

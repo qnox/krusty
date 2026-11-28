@@ -175,6 +175,7 @@ fn lower_declaration(ir: &mut IrFile, updater: &FieldUpdater) -> LoweredUpdater 
         accessor_lines: crate::ir::IrAccessorLines::default(),
         source_order: u32::MAX,
         property_delegate: false,
+        deferred: false,
     });
     ir.mark_compiler_generated_static(static_index);
     let read = ir.add_expr(IrExpr::GetStatic(static_index));

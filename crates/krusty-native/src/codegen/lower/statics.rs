@@ -41,42 +41,15 @@ impl<'a> FileLowering<'a> {
         }
     }
 
-    /// Can this property's initializer tell program start from the moment its owner is touched?
-    ///
-    /// Two cannot. A `const val`'s initializer is a compile-time constant. A delegated property's
-    /// `KProperty` metadata is a property REFERENCE, which is one emitted object per property with
-    /// no state of its own and nothing to allocate — the same value however early it is asked for.
-    /// Running either at program start is indistinguishable from running it with the owner, so the
-    /// placement fact the owner carries has nothing to say about them.
-    fn order_independent(&self, declaration: &IrStatic) -> bool {
-        declaration.is_const
-            || declaration.init.is_none_or(|init| {
-                matches!(
-                    self.ir.expr(init),
-                    IrExpr::Checked(checked_op) if matches!(&**checked_op, IrCheckedOperation::PropertyReference { .. })
-                )
-            })
-    }
-
     /// Declare a slot per top-level property. Declared before any body is compiled, because a
     /// function may read a property declared after it.
     pub(super) fn declare_statics(&mut self) -> Result<(), Unsupported> {
-        for (index, declaration) in self.ir.statics.iter().enumerate() {
+        let ir = self.ir;
+        for (index, declaration) in ir.statics.iter().enumerate() {
             // An owner is a PLACEMENT fact the JVM needs — a companion's `const val` becomes a
             // field of the OUTER class there. There is no facade here for a slot to be placed
-            // differently from, so the owner says nothing about the slot; what it could say
-            // something about is WHEN the initializer runs, since a companion's runs with the
-            // companion rather than at program start. An initializer that cannot OBSERVE the
-            // difference settles it; anything else owned by a class still declines rather than
-            // guess at the order.
-            if let Some(owner) = declaration.owner {
-                if !self.order_independent(declaration) {
-                    return Err(declined!(
-                        "a non-`const` property stored on `{}`",
-                        owner.render()
-                    ));
-                }
-            }
+            // differently from, so the owner says nothing about the slot; WHEN its initializer
+            // runs is the class static plan's (`class_statics`).
             if self.carrier(declaration.ty) == Carrier::Void {
                 return Err(declined!(
                     "a `Unit`-typed top-level property (`{}`)",
@@ -108,11 +81,14 @@ impl<'a> FileLowering<'a> {
         let symbol = self.statics_init_symbol();
         let id = self.declare_local_function(&symbol, &[], Ty::Unit)?;
         let signature = self.signature_of(&[], Ty::Unit)?;
+        // A deferred static belongs to its class: the class initializer roots and initializes it,
+        // and another file can reach that initializer without ever running this one.
         let declarations: Vec<(DataId, Ty, Option<u32>)> = self
             .ir
             .statics
             .iter()
             .enumerate()
+            .filter(|(index, _)| !self.class_statics.plan.is_deferred(*index as u32))
             .map(|(index, declaration)| (self.statics[index], declaration.ty, declaration.init))
             .collect();
 
@@ -354,6 +330,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     ) -> Result<(), Unsupported> {
         match self.top_level(target, true)? {
             TopLevel::Slot(index) => {
+                self.initialize_static_owner(index)?;
                 let slot = self.file.statics[index as usize];
                 let address = self.data_address(slot);
                 self.builder.ins().store(trusted(), value, address, 0);
@@ -367,6 +344,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     pub(super) fn static_read(&mut self, index: u32) -> Result<Option<Value>, Unsupported> {
+        self.initialize_static_owner(index)?;
         let ty = self.file.ir.statics[index as usize].ty;
         let slot = self.file.statics[index as usize];
         let clif = self.carrier(ty).clif().expect("declined at declaration");
@@ -384,6 +362,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let Some(value) = value else {
             return Err("a `Unit` value assigned to a top-level property".into());
         };
+        self.initialize_static_owner(index)?;
         let address = self.data_address(slot);
         self.builder.ins().store(trusted(), value, address, 0);
         Ok(())
