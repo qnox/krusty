@@ -251,7 +251,10 @@ impl ProductionSignatureSemantics<'_> {
                 });
             }
             let internal = binding.selected.classifier;
-            let denial = self.signature_classifier_denial(scope, internal);
+            let denial = self
+                .with_resolver(scope, |r| r.inaccessible_classifier_access(internal))
+                .ok()
+                .filter(|denial| self.table.reports_classifier_denial(scope.owner, denial));
             crate::trace_compiler!(
                 "resolve",
                 "compact type access declaration={:?} source={:?} spelling={} classifier={} inaccessible={denial:?}",

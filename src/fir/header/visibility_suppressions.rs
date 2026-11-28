@@ -52,7 +52,10 @@ impl HeaderVisibilitySuppressionArena {
                         _ => {}
                     }
                 }
-                (invisible_reference || invisible_member || optional_declaration_usage || module_export)
+                (invisible_reference
+                    || invisible_member
+                    || optional_declaration_usage
+                    || module_export)
                     .then_some(HeaderVisibilitySuppressionApplication {
                         annotation: annotation.span,
                         invisible_reference,

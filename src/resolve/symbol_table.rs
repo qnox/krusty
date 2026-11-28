@@ -708,12 +708,19 @@ impl SymbolTable {
             .is_some_and(VisibilitySuppressions::bypasses_visibility)
     }
 
-    /// Whether the declaration's lexical `@Suppress` names `JAVA_MODULE_DOES_NOT_EXPORT_PACKAGE`.
-    pub(super) fn declaration_suppresses_module_export(
+    /// Whether a signature of `declaration` reports `denial`. A visibility denial was already
+    /// exempted by the resolver the declaration's suppression policy builds; a package its module
+    /// does not export is exempted by `@Suppress("JAVA_MODULE_DOES_NOT_EXPORT_PACKAGE")`.
+    pub(super) fn reports_classifier_denial(
         &self,
         declaration: crate::fir::DeclarationId,
+        denial: &crate::symbol_resolver::ClassifierDenial,
     ) -> bool {
-        self.declaration_visibility_suppressions
+        !matches!(
+            denial,
+            crate::symbol_resolver::ClassifierDenial::PackageNotExported { .. }
+        ) || !self
+            .declaration_visibility_suppressions
             .get(&declaration)
             .is_some_and(|suppressions| suppressions.module_export)
     }

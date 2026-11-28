@@ -119,17 +119,15 @@ fn a_constant_read_and_a_callable_reference_of_an_unexported_class_are_rejected(
 
 #[test]
 fn a_suppressed_declaration_names_an_unexported_package_in_its_signature_and_supertypes() {
-    // The suppression covers the declaration's own signature types, its supertype reference and
-    // its superclass constructor call; an unsuppressed sibling still reports both of the latter.
+    // The suppression covers the declaration's own signature types and its supertype; kotlinc
+    // reports an unsuppressed sibling at the supertype reference alone, not again at its
+    // superclass constructor call. `Cache` stays an open class on every JDK the oracle runs.
     assert_same_diagnostics(
         "@Suppress(\"JAVA_MODULE_DOES_NOT_EXPORT_PACKAGE\")\n\
          fun signature(x: sun.nio.ch.DirectBuffer): sun.nio.ch.DirectBuffer = x\n\
          @Suppress(\"JAVA_MODULE_DOES_NOT_EXPORT_PACKAGE\")\n\
-         class Suppressed : sun.net.www.MessageHeader()\n\
-         class Reported : sun.net.www.MessageHeader()\n",
-        &[
-            (5, 18, "java.base", "sun.net.www"),
-            (5, 37, "java.base", "sun.net.www"),
-        ],
+         abstract class Suppressed : sun.security.util.Cache<String, String>()\n\
+         abstract class Reported : sun.security.util.Cache<String, String>()\n",
+        &[(5, 27, "java.base", "sun.security.util")],
     );
 }
