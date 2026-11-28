@@ -326,6 +326,98 @@ fun f(b: Box, s: String, n: Number?): Missing {
             ],
             errors: 11,
         },
+        // Every expected-type position krusty checks an expression against.
+        Case {
+            file: "Mismatch.kt",
+            source: "\
+fun take(i: Int) {}
+fun r(): Int = \"s\"
+fun g(): Int { return \"s\" }
+val p: Int = \"s\"
+var q = 1
+fun f() {
+    q = \"s\"
+    take(\"s\")
+    if (\"s\") {}
+    take(null)
+}
+",
+            arguments: &[],
+            diagnostics: &[
+                "Mismatch.kt:2:16: error: [RETURN_TYPE_MISMATCH] Return type mismatch: expected 'Int', actual 'String'.",
+                "Mismatch.kt:3:23: error: [RETURN_TYPE_MISMATCH] Return type mismatch: expected 'Int', actual 'String'.",
+                "Mismatch.kt:4:12: error: [INITIALIZER_TYPE_MISMATCH] Initializer type mismatch: expected 'Int', actual 'String'.",
+                "Mismatch.kt:7:7: error: [ASSIGNMENT_TYPE_MISMATCH] Assignment type mismatch: actual type is 'String', but 'Int' was expected.",
+                "Mismatch.kt:8:10: error: [ARGUMENT_TYPE_MISMATCH] Argument type mismatch: actual type is 'String', but 'Int' was expected.",
+                "Mismatch.kt:9:9: error: [CONDITION_TYPE_MISMATCH] Condition type mismatch: inferred type is 'String' but 'Boolean' was expected.",
+                "Mismatch.kt:10:10: error: [NULL_FOR_NONNULL_TYPE] Null cannot be a value of a non-null type 'Int'.",
+            ],
+            errors: 7,
+        },
+        // Every value-argument form kotlinc reports as an argument, and the do-while condition.
+        Case {
+            file: "ArgumentPositions.kt",
+            source: "\
+annotation class Ann(val x: Int)
+@Ann(\"s\") fun ann() {}
+fun <T : Number> one(t: T) {}
+fun f() {
+    one<Int>(\"s\")
+    do {} while (\"s\")
+}
+",
+            arguments: &[],
+            diagnostics: &[
+                "ArgumentPositions.kt:2:6: error: [ARGUMENT_TYPE_MISMATCH] Argument type mismatch: actual type is 'String', but 'Int' was expected.",
+                "ArgumentPositions.kt:5:14: error: [ARGUMENT_TYPE_MISMATCH] Argument type mismatch: actual type is 'String', but 'Int' was expected.",
+                "ArgumentPositions.kt:6:18: error: [CONDITION_TYPE_MISMATCH] Condition type mismatch: inferred type is 'String' but 'Boolean' was expected.",
+            ],
+            errors: 3,
+        },
+        // The other positions krusty names, each pinned by kotlinc's report: delegation, getter,
+        // local and lambda bodies, local and default-value initializers, every condition form and
+        // the null literal in each family.
+        Case {
+            file: "MismatchPositions.kt",
+            source: "\
+interface I
+class D(val s: String) : I by s
+val get: Int get() = \"s\"
+val nul: Int get() = null
+var q = 1
+fun f(b: Boolean, a: Any) {
+    val v: Int = \"s\"
+    val w: Int = null
+    q = null
+    if (\"s\" && b) {}
+    while (\"s\") {}
+    when { \"s\" -> {} }
+    if (null) {}
+    val l: () -> Int = { \"s\" }
+    when (a) { is String if \"s\" -> {} else -> {} }
+    fun loc(): Int = \"s\"
+    fun def(p: Int = \"s\") {}
+}
+",
+            arguments: &[],
+            diagnostics: &[
+                "MismatchPositions.kt:2:31: error: [TYPE_MISMATCH] Type mismatch: inferred type is 'String', but 'I' was expected.",
+                "MismatchPositions.kt:3:22: error: [RETURN_TYPE_MISMATCH] Return type mismatch: expected 'Int', actual 'String'.",
+                "MismatchPositions.kt:4:22: error: [NULL_FOR_NONNULL_TYPE] Null cannot be a value of a non-null type 'Int'.",
+                "MismatchPositions.kt:7:16: error: [INITIALIZER_TYPE_MISMATCH] Initializer type mismatch: expected 'Int', actual 'String'.",
+                "MismatchPositions.kt:8:18: error: [NULL_FOR_NONNULL_TYPE] Null cannot be a value of a non-null type 'Int'.",
+                "MismatchPositions.kt:9:9: error: [NULL_FOR_NONNULL_TYPE] Null cannot be a value of a non-null type 'Int'.",
+                "MismatchPositions.kt:10:9: error: [CONDITION_TYPE_MISMATCH] Condition type mismatch: inferred type is 'String' but 'Boolean' was expected.",
+                "MismatchPositions.kt:11:12: error: [CONDITION_TYPE_MISMATCH] Condition type mismatch: inferred type is 'String' but 'Boolean' was expected.",
+                "MismatchPositions.kt:12:12: error: [CONDITION_TYPE_MISMATCH] Condition type mismatch: inferred type is 'String' but 'Boolean' was expected.",
+                "MismatchPositions.kt:13:9: error: [CONDITION_TYPE_MISMATCH] Condition type mismatch: inferred type is 'Nothing?' but 'Boolean' was expected.",
+                "MismatchPositions.kt:14:26: error: [RETURN_TYPE_MISMATCH] Return type mismatch: expected 'Int', actual 'String'.",
+                "MismatchPositions.kt:15:29: error: [CONDITION_TYPE_MISMATCH] Condition type mismatch: inferred type is 'String' but 'Boolean' was expected.",
+                "MismatchPositions.kt:16:22: error: [RETURN_TYPE_MISMATCH] Return type mismatch: expected 'Int', actual 'String'.",
+                "MismatchPositions.kt:17:20: error: [INITIALIZER_TYPE_MISMATCH] Initializer type mismatch: expected 'Int', actual 'String'.",
+            ],
+            errors: 14,
+        },
         Case {
             file: "Forbidden.kt",
             source: "\

@@ -593,7 +593,7 @@ mod tests {
             (start as u32) + column as u32 - 1
         };
         let mismatch =
-            "condition type mismatch: inferred type is 'Int' but 'Boolean' was expected.";
+            "Condition type mismatch: inferred type is 'Int' but 'Boolean' was expected.";
 
         // kotlinc's diagnostics, in the order the checker reaches them: a script's last statement
         // first, since it is typed as the script's result before the statements run.

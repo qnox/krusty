@@ -476,7 +476,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             messages,
-            vec!["initializer type mismatch: expected 'Long', actual 'Int'.".to_string()]
+            vec!["Initializer type mismatch: expected 'Long', actual 'Int'.".to_string()]
         );
         let sums = file
             .expr_arena
@@ -539,8 +539,8 @@ mod tests {
             messages,
             vec![
                 "const 'val' initializer must be a constant value.".to_string(),
-                "initializer type mismatch: expected 'Long', actual 'Int'.".to_string(),
-                "initializer type mismatch: expected 'Byte', actual 'Int'.".to_string(),
+                "Initializer type mismatch: expected 'Long', actual 'Int'.".to_string(),
+                "Initializer type mismatch: expected 'Byte', actual 'Int'.".to_string(),
             ]
         );
         let context = CheckedConstantExpression {

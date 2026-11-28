@@ -144,8 +144,8 @@ typealias Alias<@Marker(2) T> = Target<T>
             .map(|diagnostic| diagnostic.msg.as_str())
             .collect::<Vec<_>>(),
         [
-            "argument type mismatch: actual type is 'Int', but 'String' was expected.",
-            "argument type mismatch: actual type is 'Int', but 'String' was expected.",
+            "Argument type mismatch: actual type is 'Int', but 'String' was expected.",
+            "Argument type mismatch: actual type is 'Int', but 'String' was expected.",
         ],
         "class and typealias annotations must use the normal argument checker",
     );

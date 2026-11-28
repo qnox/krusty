@@ -88,54 +88,111 @@ fn type_mentions_formal(ty: Ty, formal: &str) -> bool {
 }
 
 impl Checker<'_> {
+    /// The report for `actual` where the position `ctx` expects `expected`. A position carries
+    /// kotlinc's factory only where a kotlinc-compared case pins it
+    /// (`tests/render_internal_diagnostic_names_e2e.rs`); the others keep krusty's unnamed wording
+    /// until one does.
     pub(super) fn assignability_error_message(
         &self,
         expected: Ty,
         actual: Ty,
         ctx: &str,
-    ) -> Option<String> {
-        // Neither side is a TYPE when it still carries the not-determined marker: the declaration it
-        // came from has not been resolved yet, and the message would name `<not determined>` — a
-        // placeholder the source never wrote — for a program that may well be correct. Whatever
-        // could not be determined is reported at its own declaration.
+    ) -> Option<crate::diag::Finding> {
+        // A value argument: plain, bound to a generic parameter, checked against the bound of the
+        // formal it instantiates, or of an annotation. A default argument is its parameter's
+        // initializer, and an explicit type argument violates a bound instead.
+        if matches!(
+            ctx,
+            "argument" | "generic argument" | "bound argument" | "annotation argument"
+        ) {
+            return self
+                .argument_mismatch_message(expected, actual)
+                .map(Into::into);
+        }
+        let null = matches!(actual.kind(), TyKind::Null);
+        let (expected, actual) = self.mismatch_type_names(expected, actual)?;
+        use crate::diag::names;
+        // A null literal where a value is returned, initialized or assigned is kotlinc's
+        // `NULL_FOR_NONNULL_TYPE`; a condition and a delegation report their own factory.
+        let (name, message) = match ctx {
+            "function body" | "getter body" | "local function body" | "return" | "lambda return"
+            | "initializer" | "property initializer" | "default argument" | "assignment"
+                if null =>
+            {
+                return Some(null_for_nonnull_type(&expected).into());
+            }
+            "function body" | "getter body" | "local function body" | "return" | "lambda return" => (
+                names::RETURN_TYPE_MISMATCH,
+                format!("Return type mismatch: expected '{expected}', actual '{actual}'."),
+            ),
+            "initializer" | "property initializer" | "default argument" => (
+                names::INITIALIZER_TYPE_MISMATCH,
+                format!("Initializer type mismatch: expected '{expected}', actual '{actual}'."),
+            ),
+            "assignment" => (
+                names::ASSIGNMENT_TYPE_MISMATCH,
+                format!(
+                    "Assignment type mismatch: actual type is '{actual}', but '{expected}' was expected."
+                ),
+            ),
+            "if condition" | "while condition" | "do-while condition" | "when condition"
+            | "logical condition" | "when guard" => (
+                names::CONDITION_TYPE_MISMATCH,
+                format!(
+                    "Condition type mismatch: inferred type is '{actual}' but '{expected}' was expected."
+                ),
+            ),
+            "interface delegation" => (
+                names::TYPE_MISMATCH,
+                format!("Type mismatch: inferred type is '{actual}', but '{expected}' was expected."),
+            ),
+            _ if null => {
+                return Some(
+                    format!("null cannot be a value of a non-null type '{expected}'.").into(),
+                );
+            }
+            _ => {
+                return Some(
+                    format!("type mismatch: inferred type is {actual} but {expected} was expected")
+                        .into(),
+                );
+            }
+        };
+        Some(crate::diag::NamedMessage { name, message }.into())
+    }
+
+    /// kotlinc's `ARGUMENT_TYPE_MISMATCH` for an argument of type `actual` to a parameter of type
+    /// `expected`, or `NULL_FOR_NONNULL_TYPE` when the argument is the null literal.
+    pub(super) fn argument_mismatch_message(
+        &self,
+        expected: Ty,
+        actual: Ty,
+    ) -> Option<crate::diag::NamedMessage> {
+        let null = matches!(actual.kind(), TyKind::Null);
+        let (expected, actual) = self.mismatch_type_names(expected, actual)?;
+        Some(if null {
+            null_for_nonnull_type(&expected)
+        } else {
+            crate::diagnostic_wording::argument_type_mismatch(&actual, &expected)
+        })
+    }
+
+    /// The rendered `expected` and `actual` types of a mismatch, or `None` when either still
+    /// carries the not-determined marker: the declaration it came from has not been resolved yet,
+    /// and the message would name `<not determined>`, a placeholder the source never wrote, for a
+    /// program that may well be correct. Whatever could not be determined is reported at its own
+    /// declaration.
+    /// The null literal's type renders as kotlinc writes it, `Nothing?`.
+    fn mismatch_type_names(&self, expected: Ty, actual: Ty) -> Option<(String, String)> {
         if expected.mentions_pending() || actual.mentions_pending() {
             return None;
         }
         let context = [expected, actual];
-        let expected = self.diagnostic_type_name(expected, &context);
-        let actual = self.diagnostic_type_name(actual, &context);
-        if actual == "Null" {
-            return Some(format!(
-                "null cannot be a value of a non-null type '{expected}'."
-            ));
-        }
-        let msg = match ctx {
-            "function body" | "getter body" | "local function body" | "return" => {
-                format!("return type mismatch: expected '{expected}', actual '{actual}'.")
-            }
-            "initializer" | "property initializer" | "default argument" => {
-                format!("initializer type mismatch: expected '{expected}', actual '{actual}'.")
-            }
-            "assignment" => {
-                format!(
-                    "assignment type mismatch: actual type is '{actual}', but '{expected}' was expected."
-                )
-            }
-            argument if argument.ends_with("argument") => {
-                format!(
-                    "argument type mismatch: actual type is '{actual}', but '{expected}' was expected."
-                )
-            }
-            condition if condition.ends_with("condition") => {
-                format!(
-                    "condition type mismatch: inferred type is '{actual}' but '{expected}' was expected."
-                )
-            }
-            _ => {
-                format!("type mismatch: inferred type is {actual} but {expected} was expected")
-            }
+        let actual_name = match actual.kind() {
+            TyKind::Null => "Nothing?".to_string(),
+            _ => self.diagnostic_type_name(actual, &context),
         };
-        Some(msg)
+        Some((self.diagnostic_type_name(expected, &context), actual_name))
     }
 
     /// Remember the dependency candidate these diagnostics select, so a missing class in its
@@ -609,8 +666,8 @@ impl Checker<'_> {
             if !actual.non_null().is_fun() {
                 continue;
             }
-            if let Some(message) = self.assignability_error_message(expected, actual, "argument") {
-                self.diags.error(self.span(argument), message);
+            if let Some(report) = self.argument_mismatch_message(expected, actual) {
+                self.diags.report_error(self.span(argument), report);
                 reported = true;
             }
         }
@@ -1249,5 +1306,13 @@ impl Checker<'_> {
                 .ret
                 .apply(signature.apply_return_policy(self.libraries, inferred)),
         )
+    }
+}
+
+/// kotlinc's `NULL_FOR_NONNULL_TYPE`: the null literal where a non-null `expected` value goes.
+fn null_for_nonnull_type(expected: &str) -> crate::diag::NamedMessage {
+    crate::diag::NamedMessage {
+        name: crate::diag::names::NULL_FOR_NONNULL_TYPE,
+        message: format!("Null cannot be a value of a non-null type '{expected}'."),
     }
 }

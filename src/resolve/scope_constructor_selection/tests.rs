@@ -36,7 +36,7 @@ fn a_rejected_family_filtered_to_one_publishes_no_constructor_commitment() {
         .collect::<Vec<_>>();
     assert_eq!(
         messages,
-        ["argument type mismatch: actual type is 'StrFactory', but 'Factory<Char, Char>' was expected."]
+        ["Argument type mismatch: actual type is 'StrFactory', but 'Factory<Char, Char>' was expected."]
     );
     let info = info.expect("retained checked analysis");
     let calls = calls_named(&file, "Two");
