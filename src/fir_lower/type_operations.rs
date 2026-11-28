@@ -112,6 +112,7 @@ impl BodyLowering<'_> {
         &mut self,
         operand: FirExprId,
         target: Ty,
+        erased: Option<Ty>,
     ) -> Result<ExprId, FirLoweringFailure> {
         let operand_type = self
             .body
@@ -121,7 +122,7 @@ impl BodyLowering<'_> {
             .get();
         let value = self.expression(operand)?;
         let next_temporary = &mut self.next_temporary;
-        Ok(self.ir.safe_cast(value, operand_type, target, || {
+        Ok(self.ir.safe_cast(value, operand_type, target, erased, || {
             let temporary = *next_temporary;
             *next_temporary = temporary
                 .checked_add(1)
@@ -216,7 +217,7 @@ mod tests {
             origin,
             ty: resolved(Ty::nullable(Ty::Nothing)),
             kind: FirExprKind::TypeOperation {
-                operation: FirTypeOperation::SafeCast,
+                operation: FirTypeOperation::SafeCast(Default::default()),
                 operand,
                 target: resolved(Ty::Nothing),
             },
@@ -265,7 +266,7 @@ mod tests {
             origin,
             ty: resolved(Ty::nullable(parameter)),
             kind: FirExprKind::TypeOperation {
-                operation: FirTypeOperation::SafeCast,
+                operation: FirTypeOperation::SafeCast(Default::default()),
                 operand,
                 target: resolved(parameter),
             },

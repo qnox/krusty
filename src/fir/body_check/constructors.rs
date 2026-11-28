@@ -904,9 +904,9 @@ impl BodyFirChecker<'_> {
                     ty: target,
                     kind: FirExprKind::TypeOperation {
                         operation: if *nullable {
-                            FirTypeOperation::SafeCast
+                            FirTypeOperation::SafeCast(Default::default())
                         } else {
-                            FirTypeOperation::Cast
+                            FirTypeOperation::Cast(Default::default())
                         },
                         operand,
                         target,

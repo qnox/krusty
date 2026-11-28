@@ -689,9 +689,18 @@ pub struct FirLocalCallableRef {
 pub enum FirTypeOperation {
     Is(FirTypeTestPlan),
     NotIs(FirTypeTestPlan),
-    Cast,
-    SafeCast,
+    Cast(FirCastPlan),
+    SafeCast(FirCastPlan),
     NotNullAssertion,
+}
+
+/// Resolver-finalized facts of a checked cast `x as T` or `x as? T`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FirCastPlan {
+    /// What the cast checks at run time when `T` is a type parameter: its erasure, the first
+    /// upper bound reached through nested parameters. `None` for any other target, which is
+    /// checked as written.
+    pub erased: Option<Ty>,
 }
 
 /// Resolver-finalized facts used only by runtime type tests. Casts and null assertions carry no

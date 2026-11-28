@@ -129,7 +129,7 @@ use super::{
     FirAdaptedReferenceArgument, FirAnnotationConstruction, FirAnnotationDefaultValue,
     FirAnonymousObject, FirArrayElement, FirBinaryOperation, FirBody, FirBuiltinIterableKind,
     FirCall, FirCallArgument, FirCallTarget, FirCallableReferenceBinding,
-    FirCallableReferenceTarget, FirCapture, FirCaptureSource, FirCapturedReceiver,
+    FirCallableReferenceTarget, FirCapture, FirCaptureSource, FirCapturedReceiver, FirCastPlan,
     FirClassifierProperty, FirConstant, FirConstructorCall, FirConstructorCaptureArgument,
     FirConstructorTarget, FirControlTarget, FirControlTargetKind, FirConversion, FirConversionKind,
     FirDefaultValue, FirDelegateCall, FirDelegateDispatchReceiver, FirDestructureEntry, FirExpr,
@@ -1212,6 +1212,7 @@ impl BodyFirChecker<'_> {
                     ExprLowering::ConstructorCaptures(_)
                     | ExprLowering::BuiltinUnaryCall { .. }
                     | ExprLowering::RuntimeTypeTest { .. }
+                    | ExprLowering::RuntimeCast { .. }
                     | ExprLowering::ExtensionFunctionBinding { .. }
                     | ExprLowering::PluginExpression(_)
                     | ExprLowering::ClassStorageRead(_)
@@ -1590,11 +1591,17 @@ impl BodyFirChecker<'_> {
                     let target = self.info.resolved_type(ty).ok_or_else(|| {
                         self.failure(Some(ty.span), BodyCheckFailureKind::UnresolvedTypeSyntax)
                     })?;
+                    let plan = match self.info.expr_lowers.get(&expression) {
+                        Some(ExprLowering::RuntimeCast { erased }) => {
+                            FirCastPlan { erased: *erased }
+                        }
+                        _ => FirCastPlan::default(),
+                    };
                     FirExprKind::TypeOperation {
                         operation: if *nullable {
-                            FirTypeOperation::SafeCast
+                            FirTypeOperation::SafeCast(plan)
                         } else {
-                            FirTypeOperation::Cast
+                            FirTypeOperation::Cast(plan)
                         },
                         operand: self.expression(*operand)?,
                         target: self.resolved_type(ty.span, target)?,

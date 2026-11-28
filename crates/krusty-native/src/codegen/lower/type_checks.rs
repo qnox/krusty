@@ -10,7 +10,6 @@
 
 use super::*;
 use krusty::ir::TypeCheckRole;
-use krusty::types::TyKind;
 use krusty::types::TypeName;
 
 /// What an `is` against a type Kotlin settles by itself answers.
@@ -351,14 +350,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
     }
 
-    /// What a cast to `ty` is checked against: a type parameter is only its bound at run time.
-    fn cast_bound(ty: Ty) -> Ty {
-        match ty.non_null().kind() {
-            TyKind::TyParam(_, bound) => bound,
-            _ => ty,
-        }
-    }
-
     /// The descriptor a CAST to `ty` must be checked against, or `None` when the cast is a
     /// representation change rather than a question about an object.
     ///
@@ -369,11 +360,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// realization is the coercion the caller falls through to, and routing it through `kt_cast`
     /// would hand back the box where the site expects the number.
     fn checked_cast_target(&mut self, ty: Ty) -> Result<Option<DataId>, Unsupported> {
-        // A cast to a type PARAMETER is a cast to its bound, which is the only thing left of it at
-        // run time and exactly what kotlinc checks: `fun <T : CharSequence> f(x: Any?) = x as T`
-        // rejects a non-`CharSequence` inside `f`, before the call site's own cast to the argument
-        // it was given. An unbounded parameter bounds at `Any?`, where there is nothing to check.
-        let ty = Self::cast_bound(ty);
+        // A cast to a type PARAMETER is a cast to its erasure, which the checker records on the
+        // cast (`IrExpr::TypeOp::erased`) and callers pass here: it is the only thing left of the
+        // parameter at run time and exactly what kotlinc checks. An unbounded parameter erases to
+        // `Any?`, where there is nothing to check.
         let target = ty.non_null();
         if let Some(class) = target
             .obj_internal()
@@ -402,7 +392,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         };
         // The bound of a type parameter keeps its own nullability: `T : CharSequence?` admits null
         // although the bare `T` does not say so.
-        let helper = if ty.is_nullable() || Self::cast_bound(ty).is_nullable() {
+        let helper = if ty.is_nullable() {
             "kt_cast"
         } else {
             "kt_cast_non_null"
@@ -434,11 +424,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// A safe cast uses the same semantic function membership as `is`. A non-safe `as` remains a
     /// physical cast, which is why it continues through `checked_cast_target` below.
     fn safe_cast_target(&mut self, ty: Ty) -> Result<Option<DataId>, Unsupported> {
-        let role_ty = match ty.non_null().kind() {
-            TyKind::TyParam(_, bound) => bound,
-            _ => ty,
-        };
-        match self.file.ir.type_check_role(role_ty.non_null()) {
+        match self.file.ir.type_check_role(ty.non_null()) {
             Some(TypeCheckRole::FunctionOfArity(_))
             | Some(TypeCheckRole::SuspendFunctionOfArity(_)) => self.instance_check_descriptor(ty),
             _ => self.checked_cast_target(ty),
@@ -516,6 +502,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         op: IrTypeOp,
         arg: u32,
         type_operand: Ty,
+        erased: Option<Ty>,
         declaration_result: bool,
     ) -> Result<Option<Value>, Unsupported> {
         // This exact coercion was placed between a call's declared result and the substitution
@@ -543,7 +530,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 };
                 return self.number_result(value, type_operand);
             }
-            return self.type_operation(IrTypeOp::Cast, arg, type_operand, false);
+            return self.type_operation(IrTypeOp::Cast, arg, type_operand, None, false);
         }
         match op {
             IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => {
@@ -556,7 +543,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if let Some(settled) = Self::settled_by_language(type_operand) {
                     return self.language_instance_check(op, arg, settled);
                 }
-                let Some(descriptor) = self.instance_check_descriptor(type_operand)? else {
+                let Some(descriptor) =
+                    self.instance_check_descriptor(erased.unwrap_or(type_operand))?
+                else {
                     return Err(declined!(
                         "an `is` check against `{}`",
                         type_name_of(type_operand)
@@ -641,7 +630,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     }
                     return self.convert(checked, Some(Ty::nullable(target)), type_operand);
                 }
-                let Some(descriptor) = self.checked_cast_target(type_operand)? else {
+                let Some(descriptor) = self.checked_cast_target(erased.unwrap_or(type_operand))?
+                else {
                     // No descriptor to test against: an erased type PARAMETER, or a classifier
                     // this file does not declare. The type is gone — but whether the cast was a
                     // NON-NULL one is not, and Kotlin still checks that much: `null as T` where
@@ -687,7 +677,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.checked_object(checked, type_operand)
             }
             IrTypeOp::SafeCast => {
-                let Some(descriptor) = self.safe_cast_target(type_operand)? else {
+                let Some(descriptor) = self.safe_cast_target(erased.unwrap_or(type_operand))?
+                else {
                     return Err(declined!("an `as?` to `{}`", type_name_of(type_operand)));
                 };
                 let Some(object) = self.receiver(arg)? else {

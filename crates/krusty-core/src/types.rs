@@ -58,6 +58,7 @@ mod inline_parameters;
 pub use inline_parameters::is_inline_parameter;
 use interning::ShardedInterner;
 mod array_types;
+mod cast_erasure;
 mod primitive_arrays;
 mod raw_erasure;
 pub use raw_erasure::{formal_erasures, raw_member_type, DeclaredFormals};
