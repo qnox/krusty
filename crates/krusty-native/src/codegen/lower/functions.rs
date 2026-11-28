@@ -667,10 +667,7 @@ impl<'a> FileLowering<'a> {
             return Err("a suspend functional interface".into());
         }
         let Some(interface) = self.ir.class_id_by_name(target.classifier) else {
-            return Err(declined!(
-                "a functional interface declared outside this file (`{}`)",
-                target.classifier.render()
-            ));
+            return self.other_file_sam_table(target, base, impl_fn, captures);
         };
         let (method, entry) = match target.method_target {
             krusty::ir::IrSamMethod::Module(callable) => {
@@ -806,6 +803,117 @@ impl<'a> FileLowering<'a> {
             function_invokes,
             interfaces,
             kotlin_name,
+        })
+    }
+
+    /// [`Self::sam_table`] for a `fun interface` another file of the module declares.
+    ///
+    /// This file has no table of the interface, but the module numbers its members, and the file
+    /// declaring it defines each default body under the member's module symbol, as it does for a
+    /// class of any file implementing the interface. So the object carries `kotlin.Any`'s class
+    /// table, and at each number of the interface the body its nearest declaration supplies, with
+    /// the converted member filled by the lambda.
+    fn other_file_sam_table(
+        &mut self,
+        target: &krusty::ir::IrSamTarget,
+        base: &str,
+        impl_fn: u32,
+        captures: &CaptureStorage,
+    ) -> Result<SamTables, Unsupported> {
+        let classifier = target.classifier;
+        let outside = || {
+            declined!(
+                "a functional interface declared outside this module (`{}`)",
+                classifier.render()
+            )
+        };
+        let krusty::ir::IrSamMethod::Module(callable) = target.method_target else {
+            return Err(outside());
+        };
+        let numbers = self.model.numbers();
+        let entries = match numbers.inherited_declarations(classifier) {
+            None => return Err(outside()),
+            Some(Err(reason)) => return Err(declined!("{reason}")),
+            Some(Ok(entries)) => entries,
+        };
+        let key = krusty::backend::class_tables::module_slots::PlanKey::Callable(callable);
+        let sam_number = numbers
+            .number(key)
+            .ok_or("a functional interface method of another file with no interface number")?;
+        let (parameters, result) = numbers
+            .function_carriers(key)
+            .map(|(parameters, result)| (parameters.to_vec(), result))
+            .ok_or("a functional interface method of another file with no carriers")?;
+        // A `fun interface` that is itself a function type is also called through the invoke slot
+        // every function value declares; this file has no method of it to give that slot.
+        let invokes_function = self
+            .ir
+            .function_overrides
+            .get(&classifier)
+            .into_iter()
+            .flatten()
+            .any(|edge| {
+                edge.overridden_semantic_role
+                    == Some(krusty::types::SemanticCallRole::KotlinFunctionInvoke)
+            });
+        if invokes_function {
+            return Err(declined!(
+                "a functional interface of another file that is a function type (`{}`)",
+                classifier.render()
+            ));
+        }
+        let mut itable_template = vec![
+            model::Slot::Abstract;
+            entries.last().map_or(0, |entry| entry.number as usize + 1)
+        ];
+        for entry in entries {
+            let number = entry.number;
+            if number == sam_number {
+                continue;
+            }
+            let callable = entry.callable.ok_or_else(|| {
+                declined!(
+                    "a functional interface of another file inheriting a property default or a \
+                     bridged body (`{}`)",
+                    classifier.render()
+                )
+            })?;
+            itable_template[number as usize] = model::Slot::ModuleFunction(callable);
+        }
+        let interfaces_of = match numbers.interface(classifier) {
+            Some(Ok(numbered)) => numbered.closure().to_vec(),
+            _ => return Err(outside()),
+        };
+
+        let mut signature = vec![any()];
+        signature.extend(parameters.iter().copied());
+        let thunk = self.declare_local_function(&format!("{base}_invoke"), &signature, result)?;
+        self.define_sam_thunk(thunk, base, impl_fn, captures, &parameters, result)?;
+        let vtable = self.table_functions(
+            &[
+                model::Slot::Runtime("kt_any_equals"),
+                model::Slot::Runtime("kt_any_hash_code"),
+                model::Slot::Runtime("kt_any_to_string"),
+            ],
+            None,
+        )?;
+        let mut itable = self.table_functions(&itable_template, None)?;
+        itable[sam_number as usize] = thunk;
+        let mut interfaces: Vec<DataId> = Vec::new();
+        for name in interfaces_of {
+            let descriptor = self
+                .type_descriptor(Ty::obj_name(name))?
+                .ok_or("an interface of the module with no descriptor")?;
+            if !interfaces.contains(&descriptor) {
+                interfaces.push(descriptor);
+            }
+        }
+        Ok(SamTables {
+            vtable,
+            itable,
+            function_invokes: Vec::new(),
+            interfaces,
+            kotlin_name: classifier.render().replace(['/', '$'], "."),
         })
     }
 
