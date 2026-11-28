@@ -484,7 +484,12 @@ fn serializer_plan(
         if generated_serializer_accessor(ir, fq_name, arity).is_some() {
             let mut arguments = Vec::with_capacity(arity);
             for index in 0..arity {
-                arguments.push(if is_sealed {
+                // A star projection names no type to serialize: kotlinc hands the sealed class's
+                // accessor a `UnitSerializer` for it, as it does for an abstract class.
+                let projected_star = type_args
+                    .get(index)
+                    .is_some_and(|argument| matches!(argument.kind(), TyKind::StarProjection(_)));
+                arguments.push(if is_sealed && !projected_star {
                     type_argument_serializer_plan(
                         ir,
                         ctx,
