@@ -123,7 +123,7 @@ fn unresolved_declaration_type_parameter_annotation_is_an_error() {
             .iter()
             .map(|diagnostic| diagnostic.msg.as_str())
             .collect::<Vec<_>>(),
-        ["unresolved reference 'DefinitelyAbsentAnnotation'."]
+        ["Unresolved reference 'DefinitelyAbsentAnnotation'."]
     );
 }
 
