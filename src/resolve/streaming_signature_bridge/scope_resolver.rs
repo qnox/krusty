@@ -77,24 +77,23 @@ impl ProductionSignatureSemantics<'_> {
         callee: crate::diag::Span,
         superclass: crate::types::TypeName,
     ) {
-        let access = self
-            .with_resolver(scope, |resolver| {
-                resolver.inaccessible_classifier_access(superclass)
-            })
+        let denial = self
+            .with_resolver(scope, |r| r.inaccessible_classifier_access(superclass))
             .ok();
         crate::trace_compiler!(
             "resolve",
-            "superclass call access declaration={:?} superclass={superclass} inaccessible={access:?}",
+            "superclass call access declaration={:?} superclass={superclass} inaccessible={denial:?}",
             scope.owner,
         );
-        if let Some(access) = access {
+        // A package its module does not export is reported at the supertype reference alone.
+        if let Some(denial @ crate::symbol_resolver::ClassifierDenial::Access(_)) = denial {
             let display = superclass.render().replace(['/', '$'], ".");
             self.record_unconditional_diagnostic_at(
                 scope.owner,
                 scope.source,
                 callee,
                 crate::diag::DiagnosticIdentity::classifier_access(callee, superclass),
-                super::super::inaccessible_classifier_message(&display, access),
+                super::super::inaccessible_classifier_message(&display, &denial),
             );
         }
     }

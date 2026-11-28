@@ -32,6 +32,7 @@ mod inner_class_scopes;
 mod jar_package_census;
 mod jimage_catalog;
 mod jimage_locations;
+mod jimage_modules;
 pub(crate) mod module_descriptor;
 use builtin_signatures::{
     builtin_bounds, builtin_declared_return, builtin_descriptor, builtin_erased, builtin_ty,
@@ -2670,38 +2671,12 @@ impl Classpath {
         idx
     }
 
-    /// Seek-read a class's bytes from the JDK jimage via the lazily-built index. A "zip"-compressed
-    /// resource (the JetBrains Runtime, or any `jlink --compress` image) is wrapped in a 29-byte
-    /// `CompressedResourceHeader` (little-endian: magic `0xCAFEFAFA`, then `size`/`uncompressed_size`
-    /// i64s, decompressor name/config offsets, an `is_terminal` byte) before a zlib Deflate stream;
-    /// inflate it. The `compressed` flag is set by the indexer ONLY when the decompressor is exactly
-    /// "zip", so a resource compressed by another scheme is left as-is (and fails to parse → unresolved)
-    /// rather than blindly inflated.
+    /// Seek-read a class's bytes from the JDK jimage via the lazily-built index.
     fn jimage_bytes(&self, internal: &str) -> Option<Vec<u8>> {
         self.ensure_jimage_index();
         let guard = self.jimage.borrow();
-        let (path, index) = guard.as_ref()?;
-        let (offset, size, compressed) = index.entry(internal)?;
-        use std::io::{Read, Seek, SeekFrom};
-        let mut f = File::open(path).ok()?;
-        f.seek(SeekFrom::Start(offset)).ok()?;
-        let mut buf = vec![0u8; size];
-        f.read_exact(&mut buf).ok()?;
-        // A compressed resource carries a `CompressedResourceHeader` (magic `0xCAFEFAFA`, little-endian
-        // `[FA FA FE CA]`); inflate its zlib payload past the 29-byte header. The magic confirms the "zip"
-        // decompressor (the build stores `compressed` from the table; this is the content-side check it
-        // used to do eagerly) — a resource without it is returned as-is rather than mis-inflated.
-        if compressed && buf.len() >= 29 && buf[0..4] == [0xFA, 0xFA, 0xFE, 0xCA] {
-            let unc = u64::from_le_bytes(buf[12..20].try_into().ok()?) as usize;
-            // The jimage is a trusted local JDK file, but cap the pre-allocation hint anyway — a real
-            // `.class` is far under this, and `read_to_end` grows past it if ever needed.
-            let mut out = Vec::with_capacity(unc.min(16 * 1024 * 1024));
-            flate2::read::ZlibDecoder::new(&buf[29..])
-                .read_to_end(&mut out)
-                .ok()?;
-            return Some(out);
-        }
-        Some(buf)
+        let (_, index) = guard.as_ref()?;
+        index.read_entry(index.entry(internal)?)
     }
 
     fn ensure_jimage_index(&self) {

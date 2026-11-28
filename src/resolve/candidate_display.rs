@@ -10,10 +10,20 @@ use super::*;
 
 pub(super) fn inaccessible_classifier_message(
     name: &str,
-    access: crate::symbol_source::ClassifierAccess,
+    denial: &crate::symbol_resolver::ClassifierDenial,
 ) -> String {
+    use crate::symbol_resolver::ClassifierDenial;
     use crate::symbol_source::ClassifierAccess;
 
+    let access = match denial {
+        ClassifierDenial::Access(access) => *access,
+        ClassifierDenial::PackageNotExported { module, package } => {
+            return format!(
+                "symbol is declared in module '{module}' which does not export package '{}'.",
+                package.render().replace('/', "."),
+            );
+        }
+    };
     let kind = match access {
         ClassifierAccess::Private => "private",
         ClassifierAccess::Protected => "protected",

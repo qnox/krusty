@@ -212,6 +212,7 @@ mod declaration_usage;
 mod dependency_platform;
 mod deprecation_phase;
 use deprecation_phase::DeprecationNames;
+mod classifier_access_diagnostics;
 mod critical_section_suspension;
 mod deprecation_usage;
 mod destructuring;
@@ -219,6 +220,7 @@ mod diagnostic_selection;
 mod eager_lambda_analysis;
 mod elvis_expression;
 mod integer_literal_types;
+mod module_export_usage;
 mod type_test_narrowing;
 use type_test_narrowing::TypeTest;
 mod enum_entries;
@@ -13277,14 +13279,14 @@ impl<'a> Checker<'a> {
                 }
                 let (message, name, identity, diagnostic_span) = if had_rejected_callable {
                     (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None, None, span)
-                } else if let Some((internal, access)) = self.inaccessible_classifier(scope, &fname)
+                } else if let Some((internal, denial)) = self.inaccessible_classifier(scope, &fname)
                 {
                     let reference = self.call_callee_name_span(call);
-                    if self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
+                    if self.suppresses_diagnostic(denial.suppression_name()) {
                         (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None, None, span)
                     } else {
                         (
-                            inaccessible_classifier_message(&fname, access),
+                            inaccessible_classifier_message(&fname, &denial),
                             None,
                             Some(DiagnosticIdentity::ClassifierAccess {
                                 reference,
@@ -49383,63 +49385,6 @@ impl<'a> Checker<'a> {
         Ty::obj_args_name(internal, &arguments)
     }
 
-    fn inaccessible_classifier(
-        &self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-    ) -> Option<(TypeName, crate::symbol_source::ClassifierAccess)> {
-        let InheritedNestedClassifier::Found(internal) = self.select_classifier(scope, name) else {
-            return None;
-        };
-        self.inaccessible_classifier_reference(internal)
-            .map(|access| (internal, access))
-    }
-
-    fn reject_inaccessible_classifier_expression(
-        &mut self,
-        expression: ExprId,
-        internal: TypeName,
-    ) -> bool {
-        if self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
-            return false;
-        }
-        let Some(access) = self.inaccessible_classifier_reference(internal) else {
-            return false;
-        };
-        crate::trace_compiler!(
-            "resolve",
-            "reject inaccessible classifier expression={expression:?} internal={} access={access:?} ast={:?}",
-            internal,
-            self.file.expr(expression),
-        );
-        let reference = self.span(expression);
-        let display = match self.file.expr(expression) {
-            Expr::Name(name) => name.clone(),
-            _ => internal.render().replace(['/', '$'], "."),
-        };
-        let message = if access == crate::libraries::ClassifierAccess::PackagePrivate {
-            self.classifier_access_display(internal).map_or_else(
-                || inaccessible_classifier_message(&display, access),
-                |display| format!("cannot access '{display}': it is package-private in file."),
-            )
-        } else {
-            inaccessible_classifier_message(&display, access)
-        };
-        self.diags.error_with_identity(
-            reference,
-            DiagnosticIdentity::ClassifierAccess {
-                reference,
-                classifier: internal,
-            },
-            message,
-        );
-        // The receiver is semantically bound but unusable because that classifier access was
-        // diagnosed. Preserve that provenance across cached expression reads so an enclosing
-        // member access does not add an unrelated "Unresolved reference" cascade.
-        self.silent_error_exprs.insert(expression);
-        true
-    }
-
     /// Resolve one annotation classifier in the active lexical type scope without performing its
     /// accessibility check. This staged identity lookup is required to establish declaration
     /// suppressions before the ordinary annotation application check validates internal annotation
@@ -49495,7 +49440,9 @@ impl<'a> Checker<'a> {
         selected: &SelectedCallable,
     ) {
         if self.inaccessible_classifier_reference(classifier)
-            == Some(crate::libraries::ClassifierAccess::PackagePrivate)
+            == Some(crate::symbol_resolver::ClassifierDenial::Access(
+                crate::libraries::ClassifierAccess::PackagePrivate,
+            ))
         {
             let display = self
                 .classifier_access_display(classifier)

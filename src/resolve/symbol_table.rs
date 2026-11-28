@@ -180,6 +180,8 @@ pub(super) struct VisibilitySuppressions {
     pub(super) invisible_reference: bool,
     pub(super) invisible_member: bool,
     pub(super) optional_declaration_usage: bool,
+    /// `JAVA_MODULE_DOES_NOT_EXPORT_PACKAGE`: a classifier of a package its module does not export.
+    pub(super) module_export: bool,
 }
 
 impl VisibilitySuppressions {
@@ -188,7 +190,7 @@ impl VisibilitySuppressions {
     }
 
     pub(super) fn has_any(self) -> bool {
-        self.bypasses_visibility() || self.optional_declaration_usage
+        self.bypasses_visibility() || self.optional_declaration_usage || self.module_export
     }
 }
 
@@ -704,6 +706,23 @@ impl SymbolTable {
             .get(&declaration)
             .copied()
             .is_some_and(VisibilitySuppressions::bypasses_visibility)
+    }
+
+    /// Whether a signature of `declaration` reports `denial`. A visibility denial was already
+    /// exempted by the resolver the declaration's suppression policy builds; a package its module
+    /// does not export is exempted by `@Suppress("JAVA_MODULE_DOES_NOT_EXPORT_PACKAGE")`.
+    pub(super) fn reports_classifier_denial(
+        &self,
+        declaration: crate::fir::DeclarationId,
+        denial: &crate::symbol_resolver::ClassifierDenial,
+    ) -> bool {
+        !matches!(
+            denial,
+            crate::symbol_resolver::ClassifierDenial::PackageNotExported { .. }
+        ) || !self
+            .declaration_visibility_suppressions
+            .get(&declaration)
+            .is_some_and(|suppressions| suppressions.module_export)
     }
 
     pub(super) fn visibility_suppressed_declarations(
