@@ -2675,7 +2675,7 @@ impl SignatureConstraintExtractor {
                 enclosing,
             });
             bindings.insert("it".into(), read);
-            parameter_types.push(parameter);
+            parameter_types.push(read);
         } else {
             for (index, name) in params.iter().enumerate() {
                 let ty = match declared

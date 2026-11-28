@@ -370,7 +370,13 @@ impl SignatureGraph {
                     | SigExpr::ContextualReceiver(_),
                 )
                 | None => {}
-                Some(SigExpr::ImplicitIt { enclosing, .. }) => pending.extend(enclosing),
+                Some(SigExpr::ImplicitIt {
+                    parameter,
+                    enclosing,
+                }) => {
+                    pending.push(parameter);
+                    pending.extend(enclosing);
+                }
             }
         }
         false

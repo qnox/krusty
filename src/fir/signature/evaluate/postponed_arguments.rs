@@ -24,7 +24,7 @@ fn lambda_can_contribute_independently(
         .filter(|parameter| {
             matches!(
                 graph.expr(*parameter),
-                Some(SigExpr::ContextualParameter(_))
+                Some(SigExpr::ContextualParameter(_) | SigExpr::ImplicitIt { .. })
             )
         })
         .collect::<Vec<_>>();
