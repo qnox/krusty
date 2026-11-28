@@ -546,7 +546,7 @@ pub(crate) use streaming_signature_bridge::{
 const MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES: usize = 64;
 const MAX_OVERLOAD_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 const MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES: usize = 4 * 1024 * 1024;
-const CONFLICTING_OVERLOAD_PREFIX: &str = "conflicting overloads:";
+const CONFLICTING_OVERLOAD_PREFIX: &str = crate::diagnostic_wording::CONFLICTING_OVERLOADS_HEADER;
 const INAPPLICABLE_OVERLOAD_PREFIX: &str = "none of the following candidates is applicable:";
 
 fn header_type_has_annotation(
@@ -18961,7 +18961,7 @@ fun box(): String {
             "expected class conflict, got {errs:?}"
         );
         assert!(
-            errs.iter().any(|e| e == "conflicting overloads:\nfun f()"),
+            errs.iter().any(|e| e == "Conflicting overloads:\nfun f()"),
             "expected fun conflict, got {errs:?}"
         );
     }

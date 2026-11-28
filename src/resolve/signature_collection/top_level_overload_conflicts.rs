@@ -90,21 +90,12 @@ fn report_conflicting_top_level_overloads(
             display_bytes += 1 + candidate.display.len();
             displays.push(candidate.display.as_str());
         }
-        let message = if displays.is_empty() {
-            CONFLICTING_OVERLOAD_PREFIX.to_string()
-        } else {
-            displays.sort_unstable();
-            let mut message =
-                String::with_capacity(CONFLICTING_OVERLOAD_PREFIX.len() + display_bytes);
-            message.push_str(CONFLICTING_OVERLOAD_PREFIX);
-            for display in displays {
-                message.push('\n');
-                message.push_str(display);
-            }
-            message
-        };
+        displays.sort_unstable();
         retained_message_bytes += display_bytes;
-        diags.error(current.diagnostic_span, message);
+        diags.report_error(
+            current.diagnostic_span,
+            crate::diagnostic_wording::conflicting_overloads(displays),
+        );
     }
     diags.set_file(saved_file);
     conflicting_keys

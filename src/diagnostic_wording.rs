@@ -143,6 +143,25 @@ pub fn overload_resolution_ambiguity<S: AsRef<str>>(
     }
 }
 
+/// The header of kotlinc's `CONFLICTING_OVERLOADS` message, before its declaration lines.
+pub const CONFLICTING_OVERLOADS_HEADER: &str = "Conflicting overloads:";
+
+/// `CONFLICTING_OVERLOADS`: a declaration whose identity other declarations share, each rendered
+/// on its own line.
+pub fn conflicting_overloads<S: AsRef<str>>(
+    declarations: impl IntoIterator<Item = S>,
+) -> NamedMessage {
+    let mut message = String::from(CONFLICTING_OVERLOADS_HEADER);
+    for declaration in declarations {
+        message.push('\n');
+        message.push_str(declaration.as_ref());
+    }
+    NamedMessage {
+        name: names::CONFLICTING_OVERLOADS,
+        message,
+    }
+}
+
 /// `UNSAFE_CALL`: a member that exists only on the non-null type, called on a nullable receiver.
 pub fn unsafe_call(receiver: &str) -> NamedMessage {
     NamedMessage {

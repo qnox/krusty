@@ -4265,8 +4265,6 @@ compiler/testData/diagnostics/tests/operatorsOverloading/unrelatedInvoke.kt
 compiler/testData/diagnostics/tests/operatorsOverloading/unresolvedOperator.kt
 compiler/testData/diagnostics/tests/overload/ConflictingOlverloadsGenericFunctions.kt
 compiler/testData/diagnostics/tests/overload/ConflictingOverloadsFunsDifferentReturnInClass.kt
-compiler/testData/diagnostics/tests/overload/ConflictingOverloadsFunsDifferentReturnInPackage.kt
-compiler/testData/diagnostics/tests/overload/ConflictingOverloadsIdenticalExtFunsInPackage.kt
 compiler/testData/diagnostics/tests/overload/ConflictingOverloadsIdenticalFunsInClass.kt
 compiler/testData/diagnostics/tests/overload/ConflictingOverloadsIdenticalValsInClass.kt
 compiler/testData/diagnostics/tests/overload/ConflictingOverloadsValsDifferentTypeInClass.kt
@@ -4289,12 +4287,10 @@ compiler/testData/diagnostics/tests/overload/noConflictingOverloadsWithDeprecate
 compiler/testData/diagnostics/tests/overload/noConflictingOverloadsWithDeprecatedHidden/ConstructorsInMemberScope.kt
 compiler/testData/diagnostics/tests/overload/noConflictingOverloadsWithDeprecatedHidden/ConstructorsInPackage.kt
 compiler/testData/diagnostics/tests/overload/noConflictingOverloadsWithDeprecatedHidden/ConstructorsOnTopLevel.kt
-compiler/testData/diagnostics/tests/overload/noConflictingOverloadsWithDeprecatedHidden/DifferentDeprecationLevels.kt
 compiler/testData/diagnostics/tests/overload/noConflictingOverloadsWithDeprecatedHidden/FunctionsInMemberScope.kt
 compiler/testData/diagnostics/tests/overload/noConflictingOverloadsWithDeprecatedHidden/FunctionsInPackage.kt
 compiler/testData/diagnostics/tests/overload/noConflictingOverloadsWithDeprecatedHidden/FunctionsOnTopLevel.kt
 compiler/testData/diagnostics/tests/overload/noConflictingOverloadsWithDeprecatedHidden/LocalFunctions.kt
-compiler/testData/diagnostics/tests/overload/noConflictingOverloadsWithDeprecatedHidden/NoHiddenTransitivityFromClassifierToConstructor.kt
 compiler/testData/diagnostics/tests/overload/noConflictingOverloadsWithDeprecatedHidden/OpenFunctionsInMemberScope.kt
 compiler/testData/diagnostics/tests/overload/noConflictingOverloadsWithDeprecatedHidden/TypeParameterMultipleBounds.kt
 compiler/testData/diagnostics/tests/overload/nullableIntVsLongOverload.kt
@@ -4616,7 +4612,6 @@ compiler/testData/diagnostics/tests/redeclarations/ClassRedeclarationInDifferent
 compiler/testData/diagnostics/tests/redeclarations/ConflictingExtensionProperties.kt
 compiler/testData/diagnostics/tests/redeclarations/DuplicateParameterNamesInFunctionType.kt
 compiler/testData/diagnostics/tests/redeclarations/EnumName.kt
-compiler/testData/diagnostics/tests/redeclarations/FunVsCtorInDifferentFiles.kt
 compiler/testData/diagnostics/tests/redeclarations/LocalDeclarations.kt
 compiler/testData/diagnostics/tests/redeclarations/MultiFilePackageRedeclaration.kt
 compiler/testData/diagnostics/tests/redeclarations/PackageRedeclaredByNestedClass.kt
@@ -4624,9 +4619,7 @@ compiler/testData/diagnostics/tests/redeclarations/ParentPackageRedeclaredByClas
 compiler/testData/diagnostics/tests/redeclarations/PropertyAndInnerClass.kt
 compiler/testData/diagnostics/tests/redeclarations/RedeclarationInDefaultObject.kt
 compiler/testData/diagnostics/tests/redeclarations/RedeclarationInMultiFile.kt
-compiler/testData/diagnostics/tests/redeclarations/RedeclarationMainInFile.kt
 compiler/testData/diagnostics/tests/redeclarations/RedeclarationMainInOtherFile.kt
-compiler/testData/diagnostics/tests/redeclarations/RedeclarationOfMain.kt
 compiler/testData/diagnostics/tests/redeclarations/Redeclarations.kt
 compiler/testData/diagnostics/tests/redeclarations/RedeclarationsInObjects.kt
 compiler/testData/diagnostics/tests/redeclarations/RedeclaredTypeParameters.kt
@@ -4861,7 +4854,6 @@ compiler/testData/diagnostics/tests/resolve/propertyInCompanionOfEnum.kt
 compiler/testData/diagnostics/tests/resolve/redCodeInOverloadByLambdaReturnTypeLambda.kt
 compiler/testData/diagnostics/tests/resolve/resolveAnnotatedLambdaArgument.kt
 compiler/testData/diagnostics/tests/resolve/resolveTypeArgsForUnresolvedCall.kt
-compiler/testData/diagnostics/tests/resolve/resolveWithRedeclarationError.kt
 compiler/testData/diagnostics/tests/resolve/resolvingToClassMembersInHeader.kt
 compiler/testData/diagnostics/tests/resolve/specialConstructions/elvisAsCall.kt
 compiler/testData/diagnostics/tests/resolve/specialConstructions/exclExclAsCall.kt
@@ -5253,10 +5245,8 @@ compiler/testData/diagnostics/tests/smartCasts/publicVals/var.kt
 compiler/testData/diagnostics/tests/smartCasts/qualifiedObjectAfterSmartCast.kt
 compiler/testData/diagnostics/tests/smartCasts/receivers/implicitReceiverAsWhenSubject.kt
 compiler/testData/diagnostics/tests/smartCasts/receivers/implicitReceivers.kt
-compiler/testData/diagnostics/tests/smartCasts/receivers/mixingImplicitAndExplicitReceivers.kt
 compiler/testData/diagnostics/tests/smartCasts/safeAs.kt
 compiler/testData/diagnostics/tests/smartCasts/safecalls/argument.kt
-compiler/testData/diagnostics/tests/smartCasts/safecalls/assignSafeCall.kt
 compiler/testData/diagnostics/tests/smartCasts/safecalls/boundSafeCallAndIsCheck.kt
 compiler/testData/diagnostics/tests/smartCasts/safecalls/chainAndUse.kt
 compiler/testData/diagnostics/tests/smartCasts/safecalls/chainInChain.kt

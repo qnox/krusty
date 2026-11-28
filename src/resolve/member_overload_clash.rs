@@ -35,7 +35,7 @@ impl Checker<'_> {
         funs: &[&FunDecl],
     ) {
         let mut order = Vec::new();
-        let mut groups: HashMap<MemberOverloadKey, Vec<Span>> = HashMap::default();
+        let mut groups: HashMap<MemberOverloadKey, Vec<(Span, String)>> = HashMap::default();
         for (index, function) in funs.iter().enumerate() {
             let Some(declaration) = self.member_declaration(class_decl, owner, index) else {
                 continue;
@@ -54,21 +54,49 @@ impl Checker<'_> {
             if !groups.contains_key(&key) {
                 order.push(key.clone());
             }
-            groups.entry(key).or_default().push(function.span);
+            // kotlinc renders each declaration with its resolved result, `fun m(): Unit`.
+            let display = match self
+                .resolved_index
+                .and_then(|index| index.signature(declaration))
+            {
+                Some(signature) => {
+                    source_function_display(self.file, function, signature.result.get())
+                }
+                None => super::source_signature_display::source_function_conflict_display(
+                    self.file,
+                    function,
+                    usize::MAX,
+                )
+                .expect("unbounded source display"),
+            };
+            groups
+                .entry(key)
+                .or_default()
+                .push((function.span, display));
         }
         let mut reported = Vec::new();
         for key in order {
-            let Some(spans) = groups.get(&key) else {
+            let Some(members) = groups.get(&key) else {
                 continue;
             };
-            if spans.len() < 2 {
+            if members.len() < 2 {
                 continue;
             }
-            reported.extend(spans.iter().copied());
+            for (index, (span, _)) in members.iter().enumerate() {
+                let others = members
+                    .iter()
+                    .enumerate()
+                    .filter(|(other, _)| *other != index)
+                    .map(|(_, (_, display))| display.as_str());
+                reported.push((
+                    *span,
+                    crate::diagnostic_wording::conflicting_overloads(others),
+                ));
+            }
         }
-        reported.sort_by_key(|span| (span.lo, span.hi));
-        for span in reported {
-            self.diags.error(span, "conflicting overloads:");
+        reported.sort_by_key(|(span, _)| (span.lo, span.hi));
+        for (span, report) in reported {
+            self.diags.report_error(span, report);
         }
     }
 

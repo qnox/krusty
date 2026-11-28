@@ -1345,7 +1345,7 @@ fn oversized_conflicting_overload_signature_still_blocks_lowering() {
 
     assert_eq!(
         emitted_diagnostics(&diags),
-        [(0, "conflicting overloads:"), (1, "conflicting overloads:"),]
+        [(0, "Conflicting overloads:"), (1, "Conflicting overloads:"),]
     );
     assert!(outputs.is_empty());
 }
@@ -1368,8 +1368,8 @@ fn same_file_private_and_public_signature_conflict_blocks_lowering() {
     assert_eq!(
         emitted_diagnostics(&diags),
         [
-            (0, "conflicting overloads:\nfun crowded(value: Int): Int"),
-            (0, "conflicting overloads:\nfun crowded(value: Int): Int"),
+            (0, "Conflicting overloads:\nfun crowded(value: Int): Int"),
+            (0, "Conflicting overloads:\nfun crowded(value: Int): Int"),
         ]
     );
     assert!(outputs.is_empty());
