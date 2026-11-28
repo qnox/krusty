@@ -922,15 +922,15 @@ impl BodyLowering<'_, '_, '_> {
                 kind: krusty::types::CollectionKind::List,
                 ..
             })
-        ) && !self.file.implements_collection_of(ty)
-        {
-            // Every list the runtime hands out answers its size through one entry point, the same
-            // one `size` itself reaches, so `indices` is that size read as a range.
+        ) {
+            // A list's `indices` is its size read as a range, through the entry point `size`
+            // itself reaches: a runtime list's storage, or the `size` getter a program class
+            // publishes on its descriptor.
             let value = self.reference(receiver)?;
             if self.terminated {
                 return Ok(None);
             }
-            self.runtime_call("kt_list_size", &[any()], Ty::Int, &[value])?
+            self.runtime_call("kt_collection_size", &[any()], Ty::Int, &[value])?
         } else if matches!(
             self.file.mapped_collection(ty),
             Some(krusty::types::MappedCollection {

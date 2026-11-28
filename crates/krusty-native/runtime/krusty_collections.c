@@ -367,7 +367,7 @@ kt_int kt_collection_size(KRef collection) {
     if (collection->header.type->collection_size != NULL) {
         return collection->header.type->collection_size(collection);
     }
-    if (collection->header.type == &kt_type_list || kt_is_mutable_list(collection)) {
+    if (kt_is_runtime_list(collection)) {
         return kt_list_size(collection);
     }
     kt_int held = kt_map_collection_size(collection);
@@ -375,6 +375,11 @@ kt_int kt_collection_size(KRef collection) {
         KT_FAIL("krusty: a runtime collection was expected here\n");
     }
     return held;
+}
+
+kt_boolean kt_is_runtime_collection(KRef value) {
+    return kt_is_runtime_list(value) || kt_is_list_iterator(value) ||
+           kt_map_collection_size(value) >= 0;
 }
 
 kt_int kt_collection_size_or_default(KRef iterable, kt_int fallback) {

@@ -3,6 +3,7 @@
 //! Runtime entry points only understand runtime-owned objects. These operations test each known
 //! source implementor once and enter its own slot before falling through to the runtime shape.
 
+use super::lists::RuntimeEntry;
 use super::*;
 
 /// One interface-member call: the receiver, the arguments, the answer the site asked for, and the
@@ -13,6 +14,14 @@ pub(super) struct InterfaceMemberCall<'a> {
     pub(super) args: &'a [u32],
     pub(super) ret: Ty,
     pub(super) physical: &'a [Ty],
+}
+
+/// The link stub of one dependency interface member: its number, and the parameters and result
+/// the member declares, which the stub takes and answers.
+struct InterfaceStub<'a> {
+    number: u32,
+    params: &'a [Ty],
+    ret: Ty,
 }
 
 /// A class of this file that implements a dependency declaration, and the slot it does it in.
@@ -588,6 +597,25 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         ))
     }
 
+    /// A member of a collection interface the runtime also realizes, called through an interface
+    /// member the checker selected: see [`Self::collection_interface_call`]. `None` for any other
+    /// member, and for a receiver whose static type is not an interface the runtime's collections
+    /// stand behind.
+    pub(super) fn collection_interface_member(
+        &mut self,
+        target: krusty::fir::ExternalCallableId,
+        signature: super::super::super::intrinsics::FunctionSignature<'_>,
+        call: InterfaceMemberCall<'_>,
+        stub: Option<(Vec<u8>, &[Ty])>,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        stub.as_ref()?;
+        let ty = self.checked_type(call.receiver)?;
+        let internal = ty.non_null().obj_internal()?;
+        super::lists::collection_runtime_member(self.file, ty, signature, call.physical)
+            .filter(|(_, carried, _)| carried.len() == call.args.len() + 1)?;
+        self.dependency_interface_member(internal, target, signature, call, stub)
+    }
+
     /// Dispatch among the classes of this file implementing a dependency interface member, then
     /// among the classes the runtime makes that implement it.
     ///
@@ -626,14 +654,30 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             bridge,
             |body, object| {
                 if let Some((symbol, carried, runtime_answer)) = collection {
-                    return body.collection_runtime_call(
+                    let runtime = RuntimeEntry {
                         symbol,
-                        &carried,
-                        runtime_answer,
-                        object,
-                        &runtime_operands,
-                        call.ret,
-                    );
+                        carried: &carried,
+                        answer: runtime_answer,
+                    };
+                    return match stub {
+                        Some((number, params, declared_ret)) => body.collection_interface_call(
+                            runtime,
+                            InterfaceStub {
+                                number,
+                                params: &params,
+                                ret: declared_ret,
+                            },
+                            object,
+                            &runtime_operands,
+                            call.ret,
+                        ),
+                        None => body.collection_runtime_call(
+                            runtime,
+                            object,
+                            &runtime_operands,
+                            call.ret,
+                        ),
+                    };
                 }
                 body.dispatch_runtime_implementations(
                     runtime,
@@ -664,13 +708,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// carrier that function takes and the result to the type the call site asked for.
     fn collection_runtime_call(
         &mut self,
-        symbol: &'static str,
-        carried: &[Ty],
-        runtime_answer: Ty,
+        runtime: RuntimeEntry<'_>,
         object: Value,
         operands: &[(Value, Option<Ty>)],
         ret: Ty,
     ) -> Result<Option<Value>, Unsupported> {
+        let RuntimeEntry {
+            symbol,
+            carried,
+            answer: runtime_answer,
+        } = runtime;
         let mut values = Vec::with_capacity(carried.len());
         values.push(object);
         for ((value, source), target) in operands.iter().zip(carried.iter().skip(1)) {
@@ -683,6 +730,50 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(None);
         };
         self.convert(produced, Some(runtime_answer), ret)
+    }
+
+    /// A collection interface member the runtime also realizes, on an object that may be either
+    /// the runtime's or the program's. Which one made it is a question of representation, asked
+    /// of the object: a collection the runtime made answers through the runtime entry point, and
+    /// any other through the interface member's stub, which the link joins to whatever class of
+    /// whichever unit implements it, as every interface call is joined.
+    fn collection_interface_call(
+        &mut self,
+        runtime: RuntimeEntry<'_>,
+        stub: InterfaceStub<'_>,
+        object: Value,
+        operands: &[(Value, Option<Ty>)],
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        self.null_check(object)?;
+        let made = self
+            .runtime_call("kt_is_runtime_collection", &[any()], Ty::Boolean, &[object])?
+            .expect("`kt_is_runtime_collection` returns a Boolean");
+        let merge = self.builder.create_block();
+        let carried = self.carrier(ret);
+        if let Some(clif) = carried.clif() {
+            self.builder.append_block_param(merge, clif);
+        }
+        let by_runtime = self.builder.create_block();
+        let by_interface = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(made, by_runtime, &[], by_interface, &[]);
+
+        self.continue_in(by_runtime);
+        self.builder.seal_block(by_runtime);
+        let produced = self.collection_runtime_call(runtime, object, operands, ret)?;
+        self.jump_to_merge(merge, carried, produced);
+
+        self.continue_in(by_interface);
+        self.builder.seal_block(by_interface);
+        let produced =
+            self.dispatch_through_stub(object, stub.number, operands, stub.params, stub.ret, ret)?;
+        self.jump_to_merge(merge, carried, produced);
+
+        self.builder.switch_to_block(merge);
+        self.builder.seal_block(merge);
+        Ok(carried.clif().map(|_| self.builder.block_params(merge)[0]))
     }
 
     pub(super) fn dispatch_by_implementor_with(

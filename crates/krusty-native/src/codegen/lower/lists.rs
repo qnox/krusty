@@ -405,14 +405,14 @@ fn collection_symbol(
     })
 }
 
-/// The runtime's own entry point for a member: the last arm of a dispatch by implementor, taken
-/// when the receiver is none of this file's classes.
-struct RuntimeEntry<'c> {
-    symbol: &'static str,
-    /// The entry point's parameter carriers, receiver excluded.
-    carried: &'c [Ty],
+/// The runtime's own entry point for a member: the arm taken when the receiver is an object the
+/// runtime made.
+pub(super) struct RuntimeEntry<'c> {
+    pub(super) symbol: &'static str,
+    /// The entry point's parameter carriers, the receiver's first.
+    pub(super) carried: &'c [Ty],
     /// What the entry point hands back.
-    answer: Ty,
+    pub(super) answer: Ty,
 }
 
 impl BodyLowering<'_, '_, '_> {
@@ -752,21 +752,10 @@ impl BodyLowering<'_, '_, '_> {
                 "value" => ("kt_indexed_value_value", any()),
                 _ => return None,
             }
-        } else if (is_list(self.file, ty) || is_collection(self.file, ty))
-            && self.file.implements_collection_of(ty)
-        {
-            // The class publishes its `size` getter on the descriptor. `kt_collection_size`
-            // calls that for a program object and the runtime layout otherwise.
-            match name {
-                "getSize" | "size" => ("kt_collection_size", Ty::Int),
-                _ => return None,
-            }
-        } else if is_list(self.file, ty) && !self.file.implements_collection_of(ty) {
-            match name {
-                "getSize" | "size" => ("kt_list_size", Ty::Int),
-                _ => return None,
-            }
-        } else if is_collection(self.file, ty) && !self.file.implements_collection_of(ty) {
+        } else if is_list(self.file, ty) || is_collection(self.file, ty) {
+            // `kt_collection_size` reads a runtime collection's own storage and asks any other
+            // object for the `size` getter its class publishes on the descriptor, whichever unit
+            // laid that class out.
             match name {
                 "getSize" | "size" => ("kt_collection_size", Ty::Int),
                 _ => return None,
@@ -832,19 +821,9 @@ impl BodyLowering<'_, '_, '_> {
             return Some(self.list_call(symbol, &carried, answer, receiver, args, ret));
         }
         // A LIST's OWN members — indexed access, size, removal — are about the runtime's list
-        // REPRESENTATION rather than about walking. A file that also puts a class of its own
-        // behind the receiver's type dispatches that class first; this direct call is only for a
-        // receiver no class of the file can be. See [`FileLowering::implements_collection_of`].
-        // The shape is as coarse as `Iterable`, so a class implementing only `Collection` marks
-        // `List` too; only a class that can stand behind this very type is one to dispatch to.
-        if self.file.implements_collection_of(ty)
-            && ty
-                .non_null()
-                .obj_internal()
-                .is_none_or(|internal| !self.file.implementors_of(internal).is_empty())
-        {
-            return None;
-        }
+        // REPRESENTATION rather than about walking. A call through an interface member reaches
+        // here only when it has no interface stub to dispatch a program's object through (see
+        // [`BodyLowering::collection_interface_member`]).
         let (symbol, carried, answer) =
             collection_runtime_member(self.file, ty, signature, physical)?;
         Some(self.list_call(symbol, &carried, answer, receiver, args, ret))
@@ -869,21 +848,6 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let ty = self.checked_type(receiver)?;
         if self.file.implements_unwalkable_collection_of(ty) {
-            return None;
-        }
-        // A member Kotlin gives a SPECIAL BRIDGE is not a walk's to answer where this file puts a
-        // class of its own behind the receiver's type. `Collection<E>.contains(x as E)` answers
-        // the OVERRIDE for an implementor of the program's — the bridge is what decides, by
-        // whether the argument can be what the declaration accepts — and a walk would compare
-        // elements instead, which is a different question with a different answer
-        // (`codegen/box/bridges/strListContains.kt`). Where the file implements nothing of the
-        // shape the receiver is the runtime's own and the walk IS the member.
-        if self.file.implements_collection_of(ty)
-            && ty.non_null().obj_internal().is_some_and(|internal| {
-                classifier_shapes::mapped_collection(self.file.classifiers, internal)
-                    .is_some_and(|collection| collection.has_special_bridge(signature.name))
-            })
-        {
             return None;
         }
         // A receiver typed by a runtime-known collection type, or by a CLASS OF THIS FILE whose

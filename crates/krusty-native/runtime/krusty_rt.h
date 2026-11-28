@@ -491,6 +491,11 @@ kt_boolean kt_list_is_empty(KRef list);
 /* `Collection.size`: a list's, a set's or a map view's, decided by the descriptor. */
 kt_int kt_collection_size(KRef collection);
 kt_int kt_collection_size_or_default(KRef iterable, kt_int fallback);
+/* Whether `value` is a collection this runtime made -- a list, a view of one, a list's iterator, a
+   map, a set or a view of a map -- rather than an object of a class of the program, whichever unit laid that
+   class out. A call through a collection interface asks this first: the runtime's entry point
+   answers for what the runtime made, and the interface's own dispatch for everything else. */
+kt_boolean kt_is_runtime_collection(KRef value);
 kt_boolean kt_collection_is_empty(KRef collection);
 kt_boolean kt_collection_contains_all(KRef self, KRef elements);
 /* `MutableCollection`'s members over a growable list or a set (or a map view, which removes and
