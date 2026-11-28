@@ -74,6 +74,8 @@ mod declared_property_access;
 mod declared_property_accessor;
 use declared_property_accessor::accessor_jvm_names;
 mod default_impls;
+mod default_masks;
+use default_masks::{default_mask_bit, default_mask_count, full_default_masks};
 mod delegated_property_array;
 mod field_nullability;
 use field_nullability::{
@@ -4211,24 +4213,6 @@ fn property_jvm_signatures(
     type_parameter: Option<&str>,
 ) -> JvmPropertySignatures {
     formatter.property_signatures(ty, type_parameter)
-}
-
-fn default_mask_count(param_count: usize) -> usize {
-    param_count.div_ceil(32).max(1)
-}
-
-fn default_mask_bit(param_index: usize) -> i32 {
-    (1u32 << (param_index % 32)) as i32
-}
-
-fn full_default_masks(param_count: usize) -> Vec<i32> {
-    (0..default_mask_count(param_count))
-        .map(|chunk| {
-            let start = chunk * 32;
-            let end = ((chunk + 1) * 32).min(param_count);
-            (start..end).fold(0i32, |mask, i| mask | default_mask_bit(i))
-        })
-        .collect()
 }
 
 /// The owner and JVM carrier of a value class adapted through its own `box-impl`/`unbox-impl`.
