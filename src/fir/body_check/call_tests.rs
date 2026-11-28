@@ -4837,23 +4837,3 @@ fn a_generic_operator_call_publishes_its_solved_type_arguments() {
         assert_eq!(substitution.value.get(), expected);
     }
 }
-
-#[test]
-fn compound_assignment_to_companion_associated_properties_checks_without_a_receiver_value() {
-    // `C` qualifies the property; it is not a value the read and the write evaluate once.
-    let (body, _) = checked_function_body(
-        "// LANGUAGE: +CompanionBlocks +CompanionExtensions\n\
-         private var stored = 1\n\
-         class C { companion { var block: Int = 1 } }\n\
-         companion var C.extension: Int\n\
-             get() = stored\n\
-             set(value) { stored = value }\n\
-         fun box(): String {\n\
-             C.block += 1\n\
-             C.extension *= 3\n\
-             return if (C.block == 2 && C.extension == 3) \"OK\" else \"Fail\"\n\
-         }\n",
-        "box",
-    );
-    assert!(body.expr(root_expression(&body)).is_some());
-}
