@@ -1364,6 +1364,41 @@ impl Checker<'_> {
                     intersection_bindings.insert(formal.clone(), views);
                 }
             }
+            // A literal is built from the classifier its type variable's OTHER bounds name: one
+            // such classifier builds it, and two leave its type ambiguous (a lower bound
+            // `MutableSet<E>` and an expected upper `Set<*>` both declare a factory).
+            let ambiguous_literals = inference_actuals
+                .iter()
+                .filter_map(|&(argument, parameter, _, whole_array)| {
+                    if whole_array
+                        || !matches!(
+                            argument_kinds[argument],
+                            CallArgKind::CollectionLiteral { .. }
+                        )
+                    {
+                        return None;
+                    }
+                    let mut declared = signature.params[parameter];
+                    if candidate.call_sig.vararg_index == Some(parameter) {
+                        declared = declared.array_read_elem().unwrap_or(declared);
+                    }
+                    let (TyKind::TyParam(formal, _) | TyKind::Var(formal, _)) =
+                        declared.non_null().kind()
+                    else {
+                        return None;
+                    };
+                    let lowers = preliminary
+                        .lower_inputs
+                        .get(formal.as_str())
+                        .map_or(&[][..], Vec::as_slice);
+                    let upper = expected_literal_targets
+                        .as_ref()
+                        .and_then(|targets| targets.get(formal.as_str()))
+                        .copied();
+                    let classifiers = self.literal_bound_classifiers(lowers, upper);
+                    (!classifiers.is_empty()).then_some((argument, classifiers))
+                })
+                .collect::<Vec<_>>();
             let variables = call_variables.variables();
             let selected = call_site_publication::declared_selection(
                 variables,
@@ -1371,6 +1406,7 @@ impl Checker<'_> {
                 specialized_bindings,
                 intersection_bindings,
                 index,
+                ambiguous_literals,
             );
             let shapes = call_site_publication::CandidateParameterShapes {
                 selection: selection_params,
@@ -1791,6 +1827,15 @@ impl Checker<'_> {
             selected.callable.default_realization.is_some(),
             selected.callable.descriptor,
         );
+        // Each commit of the call replaces what an earlier commit published for its literals.
+        let mut ambiguities = self.collection_literal_ambiguities.borrow_mut();
+        for argument in args {
+            ambiguities.remove(argument);
+        }
+        for (argument, classifiers) in &selected.ambiguous_literals {
+            ambiguities.insert(args[*argument], classifiers.clone());
+        }
+        drop(ambiguities);
         Some(if missing_context {
             CallableCandidateSelection::MissingContext(Box::new(selected))
         } else {

@@ -437,6 +437,7 @@ mod singleton_receivers;
 pub use singleton_receivers::SingletonValue;
 mod anonymous_capture_remap;
 mod constructor_receiver_frames;
+mod lexical_receivers;
 mod primary_constructor_arguments;
 mod source_constructors;
 mod source_package;
@@ -445,6 +446,7 @@ mod streaming_signature_bridge;
 #[cfg(test)]
 mod streaming_signature_tests;
 mod super_calls;
+use lexical_receivers::{lexical_context_receiver, lexical_receiver_declaration};
 use super_calls::is_super_qualifier;
 pub use super_calls::ResolvedSuperCall;
 mod superclass_validation;
@@ -544,35 +546,6 @@ const MAX_OVERLOAD_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 const MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES: usize = 4 * 1024 * 1024;
 const CONFLICTING_OVERLOAD_PREFIX: &str = "conflicting overloads:";
 const INAPPLICABLE_OVERLOAD_PREFIX: &str = "none of the following candidates is applicable:";
-
-fn lexical_receiver_label(file: &File, reference: &TypeRef) -> String {
-    file.alias_spellings
-        .get(&reference.span)
-        .unwrap_or(reference)
-        .name
-        .rsplit(['.', '/'])
-        .next()
-        .unwrap_or(&reference.name)
-        .to_string()
-}
-
-fn lexical_receiver_declaration(file: &File, reference: &TypeRef) -> (Span, String) {
-    (reference.span, lexical_receiver_label(file, reference))
-}
-
-fn lexical_context_receiver(file: &File, parameter: &Param, ty: Ty) -> ContextReceiver {
-    let kind = match parameter.context_kind {
-        crate::types::ContextParameterKind::Named => {
-            return ContextReceiver::named(ty, parameter.name.clone())
-                .with_declaration(parameter.ty.span)
-        }
-        crate::types::ContextParameterKind::Anonymous => ContextReceiverKind::Anonymous,
-        crate::types::ContextParameterKind::LegacyReceiver => ContextReceiverKind::LegacyReceiver,
-        crate::types::ContextParameterKind::None => unreachable!("a context parameter has a kind"),
-    };
-    ContextReceiver::new(ty, kind, Some(lexical_receiver_label(file, &parameter.ty)))
-        .with_declaration(parameter.ty.span)
-}
 
 fn header_type_has_annotation(
     annotations: &[TypeRef],
@@ -6988,6 +6961,9 @@ impl<'a> Checker<'a> {
         let expected = expected
             .filter(|expected| *expected != Ty::Error)
             .map(Ty::non_null);
+        let Some(expected) = self.collection_literal_expectation(call, span, expected) else {
+            return Ty::Error;
+        };
 
         // Array literals are compiler-provided constructions, selected from the expected array
         // classifier rather than from the provisional parser spelling. Primitive and unsigned
@@ -12661,6 +12637,7 @@ impl<'a> Checker<'a> {
                             bindings,
                             intersection_bindings: HashMap::default(),
                             candidate_index: None,
+                            ambiguous_literals: Vec::new(),
                         }))
                     })
                     .or(competing_function)
@@ -23684,6 +23661,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         inferred_ext_fun_rets: HashMap::default(),
         inferred_method_rets: HashMap::default(),
         operator_of_overloads: Vec::new(),
+        collection_literal_ambiguities: std::cell::RefCell::default(),
         inferred_source_member_rets: HashMap::default(),
         inferred_stable_declaration_rets: HashMap::default(),
         inferred_declaration_publications: Default::default(),
@@ -24723,6 +24701,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         inferred_ext_fun_rets,
         inferred_method_rets,
         operator_of_overloads: _,
+        collection_literal_ambiguities: _,
         inferred_source_member_rets,
         inferred_stable_declaration_rets,
         inferred_declaration_publications,
@@ -25248,6 +25227,9 @@ struct SelectedCallable {
     /// Position in the exact family passed to `select_callable_candidate`. A postponed call can
     /// therefore finish against the same declaration instead of selecting the overload again.
     candidate_index: Option<usize>,
+    /// Collection-literal arguments (by argument position) passed for a type variable, with the
+    /// bounds of that variable, in bound order, one per classifier that constructs literals.
+    ambiguous_literals: Vec<(usize, Vec<Ty>)>,
 }
 
 impl std::ops::Deref for SelectedCallable {
@@ -25732,6 +25714,9 @@ struct Checker<'a> {
     inferred_ext_fun_rets: HashMap<(u32, u32, String), Ty>,
     inferred_method_rets: HashMap<(TypeName, String, Vec<Ty>), Ty>,
     operator_of_overloads: Vec<operator_of_declarations::OperatorOfOverload>,
+    /// Collection literals passed for a type variable, with the literal-constructing bounds of
+    /// that variable, published by the selection that won their call.
+    collection_literal_ambiguities: std::cell::RefCell<HashMap<ExprId, Vec<Ty>>>,
     inferred_source_member_rets: HashMap<crate::libraries::SourceMember, Ty>,
     inferred_stable_declaration_rets: HashMap<crate::fir::DeclarationId, Ty>,
     inferred_declaration_publications: declaration_publication::InferredDeclarationPublications,
