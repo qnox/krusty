@@ -922,8 +922,13 @@ impl BodyLowering<'_, '_, '_> {
                             };
                             return self.convert(produced, Some(answer), *ret);
                         }
-                        let Some(symbol) =
-                            super::super::super::intrinsics::runtime_member(signature)
+                        // `k.isInstance(value)`: the class descriptor tested against the value, the
+                        // test an `is` makes. The provider authenticated the declaration.
+                        let authenticated = (realization.compiler_operation()
+                            == Some(krusty::libraries::CompilerIntrinsic::ClassIsInstance))
+                        .then_some("kt_class_is_instance");
+                        let Some(symbol) = authenticated
+                            .or_else(|| super::super::super::intrinsics::runtime_member(signature))
                         else {
                             if realization.owner_is_interface {
                                 if let Some(identity) = realization.member_slot_identity() {

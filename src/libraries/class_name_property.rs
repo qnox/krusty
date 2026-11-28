@@ -4,7 +4,10 @@
 //! tokens. The JVM stdlib implements the same declarations as ordinary interface methods. Archive
 //! authority is an input fact, never inferred from a package or manifest spelling.
 
-use super::{ClassNameKind, CompilerIntrinsic, PropKind, PropertyInfo};
+use super::{
+    ClassNameKind, CompilerIntrinsic, FnKind, FunctionInfo, MemberRealization, PropKind,
+    PropertyInfo,
+};
 use crate::types::{wk, Ty, TypeName};
 
 pub(crate) fn realize_class_name_property(
@@ -54,6 +57,32 @@ pub(crate) fn realize_class_name_property(
         && !property.getter.suspend
     {
         property.getter.compiler_intrinsic = Some(CompilerIntrinsic::ClassName(kind));
+    }
+}
+
+/// Authenticate the platform stdlib's `KClass.isInstance(value: Any?): Boolean`, the one abstract
+/// interface member of that exact shape on `kotlin.reflect.KClass`.
+pub(crate) fn realize_class_is_instance(
+    owner: TypeName,
+    compiler_builtin_owner: bool,
+    function: &mut FunctionInfo,
+) {
+    if compiler_builtin_owner
+        && owner == wk::kclass()
+        && function.kind == FnKind::Member
+        && function.callable.name == "isInstance"
+        && function
+            .receiver
+            .is_none_or(|receiver| receiver == Ty::obj_name(owner))
+        && function.semantic_params().as_ref() == [Ty::nullable(Ty::obj_name(wk::any()))]
+        && function.callable.ret == Ty::Boolean
+        && function.context_count == 0
+        && function.flags.is_abstract
+        && !function.flags.suspend
+    {
+        function.callable.compiler_intrinsic = Some(CompilerIntrinsic::ClassIsInstance);
+        function.callable.member_realization =
+            MemberRealization::Intrinsic(CompilerIntrinsic::ClassIsInstance);
     }
 }
 

@@ -35,6 +35,9 @@ impl Runtime {
         }
         let info = self.objects.type_infos.global(module, class);
         self.objects.type_infos.name(module, class, &names);
+        // Every non-null value is an instance of `kotlin.Any`.
+        self.class_tokens
+            .register_heap_test(module, info, HeapType::Eq);
         init.ref_null(HeapType::Concrete(self.objects.itable))
             .global_get(info)
             .struct_new(self.objects.any_table);

@@ -192,7 +192,8 @@ pub fn link_constructor_reads<V: Clone>(
 
 /// The link of each type test against another file's class that `ir` emits: an `is` or `!is`
 /// whose class `ir` does not declare and `module` certifies a file declares. One `module` does
-/// not certify has no link, and the target declines it.
+/// not certify has no link, and the target declines it. A class literal names its class, and so
+/// does a call of `KClass.isInstance` on one, whose receiver is that literal.
 pub fn link_type_test_reads<V: Clone>(
     ir: &IrFile,
     module: &BackendModuleFacts,
@@ -204,15 +205,20 @@ pub fn link_type_test_reads<V: Clone>(
         .into_iter()
         .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
     {
-        let IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::InstanceOf | crate::ir::IrTypeOp::NotInstanceOf,
-            type_operand,
-            ..
-        } = ir.expr(expression)
-        else {
-            continue;
+        let tested = match ir.expr(expression) {
+            IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::InstanceOf | crate::ir::IrTypeOp::NotInstanceOf,
+                type_operand,
+                ..
+            } => *type_operand,
+            IrExpr::KClassLiteral {
+                classifier: Some(tested),
+                value: None,
+                type_argument: false,
+            } => *tested,
+            _ => continue,
         };
-        let Some(classifier) = type_operand.non_null().obj_internal() else {
+        let Some(classifier) = tested.non_null().obj_internal() else {
             continue;
         };
         if ir.class_id_by_name(classifier).is_some() {

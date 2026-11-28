@@ -384,7 +384,6 @@ module=6:stdlib public package=2[6:kotlin,6:system] declaration=1[11:exitProcess
 module=6:stdlib public package=2[6:kotlin,6:system] declaration=1[12:getTimeNanos] member=17000814855008684164 mask=0
 module=6:stdlib public package=2[6:kotlin,6:system] declaration=1[13:getTimeMicros] member=17225472174590813616 mask=0
 module=6:stdlib public package=2[6:kotlin,6:system] declaration=1[13:getTimeMillis] member=4871286504131365894 mask=0
-module=6:stdlib public package=2[6:kotlin,7:reflect] declaration=2[6:KClass,10:isInstance] member=2325648755598100529 mask=0
 module=6:stdlib public package=2[6:kotlin,7:reflect] declaration=2[6:KClass,6:equals] member=4638265728071529943 mask=0
 module=6:stdlib public package=2[6:kotlin,7:reflect] declaration=2[6:KClass,8:hashCode] member=3409210261493131192 mask=0
 module=6:stdlib public package=2[6:kotlin,9:contracts] declaration=2[12:SimpleEffect,7:implies] member=12623418141033720606 mask=0

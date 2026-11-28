@@ -80,6 +80,7 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || matches!(
             operation,
             krusty::backend::BackendCompilerIntrinsic::ClassName(_)
+                | krusty::backend::BackendCompilerIntrinsic::ClassIsInstance
         )
 }
 
@@ -1140,6 +1141,9 @@ impl<'a> Body<'a> {
     /// Emit `id`, leaving its value on the stack when it has one.
     fn expression(&mut self, id: u32) -> Result<(), Unsupported> {
         let node = self.ir.expr(id).clone();
+        if let Some(result) = self.class_is_instance_expression(id, &node) {
+            return result;
+        }
         if let Some(result) = self.library_member_expression(id, &node) {
             return result;
         }
