@@ -786,6 +786,12 @@ jobs:
       - name: e2e
         env:
           RUST_MIN_STACK: "134217728"
+          # One box() call's deadline, as `just smoke` sets it. native_runtime_e2e's
+          # range_contains_unsigned walks about 430 million progression elements in kotlinc's JVM
+          # program: 0.45s alone on one core, 1.9s sharing it with three others and 3.8s with
+          # seven. Here it shares four cores with every test thread's compiles and other box()
+          # calls, and on 2026-11-28 it ran past the 10s default.
+          KRUSTY_BOX_TIMEOUT_MS: "60000"
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
