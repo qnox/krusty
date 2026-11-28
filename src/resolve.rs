@@ -212,6 +212,7 @@ mod declaration_usage;
 mod dependency_platform;
 mod deprecation_phase;
 use deprecation_phase::DeprecationNames;
+mod classifier_access_diagnostics;
 mod critical_section_suspension;
 mod deprecation_usage;
 mod destructuring;
@@ -49382,66 +49383,6 @@ impl<'a> Checker<'a> {
             return Ty::Error;
         }
         Ty::obj_args_name(internal, &arguments)
-    }
-
-    fn inaccessible_classifier(
-        &self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-    ) -> Option<(TypeName, crate::symbol_resolver::ClassifierDenial)> {
-        let InheritedNestedClassifier::Found(internal) = self.select_classifier(scope, name) else {
-            return None;
-        };
-        self.inaccessible_classifier_reference(internal)
-            .map(|denial| (internal, denial))
-    }
-
-    fn reject_inaccessible_classifier_expression(
-        &mut self,
-        expression: ExprId,
-        internal: TypeName,
-    ) -> bool {
-        let Some(denial) = self.inaccessible_classifier_reference(internal) else {
-            return false;
-        };
-        if self.suppresses_diagnostic(denial.suppression_name()) {
-            return false;
-        }
-        crate::trace_compiler!(
-            "resolve",
-            "reject inaccessible classifier expression={expression:?} internal={} access={denial:?} ast={:?}",
-            internal,
-            self.file.expr(expression),
-        );
-        let reference = self.span(expression);
-        let display = match self.file.expr(expression) {
-            Expr::Name(name) => name.clone(),
-            _ => internal.render().replace(['/', '$'], "."),
-        };
-        let message = if denial
-            == crate::symbol_resolver::ClassifierDenial::Access(
-                crate::libraries::ClassifierAccess::PackagePrivate,
-            ) {
-            self.classifier_access_display(internal).map_or_else(
-                || inaccessible_classifier_message(&display, &denial),
-                |display| format!("cannot access '{display}': it is package-private in file."),
-            )
-        } else {
-            inaccessible_classifier_message(&display, &denial)
-        };
-        self.diags.error_with_identity(
-            reference,
-            DiagnosticIdentity::ClassifierAccess {
-                reference,
-                classifier: internal,
-            },
-            message,
-        );
-        // The receiver is semantically bound but unusable because that classifier access was
-        // diagnosed. Preserve that provenance across cached expression reads so an enclosing
-        // member access does not add an unrelated "Unresolved reference" cascade.
-        self.silent_error_exprs.insert(expression);
-        true
     }
 
     /// Resolve one annotation classifier in the active lexical type scope without performing its
