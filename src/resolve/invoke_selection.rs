@@ -108,16 +108,55 @@ impl Checker<'_> {
                 }
             }
         }
-        let Ok(Some(selection)) = self.select_property_read(scope, receiver.ty, name) else {
-            return Ok(None);
+        let selection = match self.implicit_callable_property(scope, receiver.ty, name) {
+            Ok(Some(selection)) => selection,
+            Ok(None) => return Ok(None),
+            Err(ambiguity) => {
+                self.report_property_read_ambiguity(self.span(expression), name, ambiguity);
+                return Err(());
+            }
         };
-        if !self.value_type_claims_call(scope, selection.ty()) {
-            return Ok(None);
-        }
         let ty = self.record_property_read(scope, Some(expression), selection);
         self.set(expression, ty);
         self.mark_implicit_receiver_selection(expression, receiver);
         Ok(Some(ty))
+    }
+
+    /// The property a bare call `name(...)` reads on `receiver` and then invokes: one whose value
+    /// claims the call, a function type or a value with an `invoke` operator. A property whose
+    /// value cannot be called contributes no candidate. An ambiguous read is an error at this
+    /// receiver, never a reason to look at a farther one.
+    pub(super) fn implicit_callable_property(
+        &self,
+        scope: &CheckerScope<'_>,
+        receiver: Ty,
+        name: &str,
+    ) -> Result<Option<PropertyReadSelection>, PropertyReadAmbiguity> {
+        let Some(selection) = self.select_property_read(scope, receiver, name)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .value_type_claims_call(scope, selection.ty())
+            .then_some(selection))
+    }
+
+    /// Whether a receiver nearer than the dispatch receiver `owner` has a property `name` whose
+    /// value claims a call: that receiver's level outranks the dispatch property's.
+    pub(super) fn nearer_receiver_property_claims_call(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        owner: (usize, usize),
+    ) -> bool {
+        self.implicit_receivers(scope)
+            .into_iter()
+            .take_while(|receiver| receiver.identity != owner)
+            .any(|receiver| {
+                !matches!(
+                    self.implicit_callable_property(scope, receiver.ty, name),
+                    Ok(None)
+                )
+            })
     }
 
     pub(super) fn invoke_operator_candidates(

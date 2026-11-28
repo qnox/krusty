@@ -159,6 +159,46 @@ impl Checker<'_> {
         })
     }
 
+    /// The value-parameter expectations a bare call `name(args)` of a function value gives its
+    /// arguments before they are checked: the receiver-function spelling when the tower supplies
+    /// its implicit receiver, otherwise the plain value parameters with their contexts in scope.
+    /// Named arguments map to no parameter of a function value, so they leave no expectation.
+    pub(super) fn function_value_argument_expectations(
+        &self,
+        scope: &CheckerScope<'_>,
+        semantic: Ty,
+        argument_count: usize,
+        named_arguments: bool,
+    ) -> Option<Vec<Ty>> {
+        let TyKind::Fun(signature) = semantic.kind() else {
+            return None;
+        };
+        if named_arguments {
+            return None;
+        }
+        if signature.has_receiver {
+            let parts = Self::receiver_function_parts(signature)?;
+            return (self.receiver_function_context_available(scope, &parts)
+                && self
+                    .receiver_function_implicit_receiver(
+                        scope,
+                        parts.receiver,
+                        parts.values.len(),
+                        argument_count,
+                    )
+                    .is_some())
+            .then(|| parts.values.to_vec());
+        }
+        let context_count = signature.context_count.min(signature.params.len());
+        let parameters = &signature.params[context_count..];
+        (parameters.len() == argument_count
+            && (context_count == 0
+                || self
+                    .select_context_arguments(scope, &signature.params[..context_count])
+                    .is_some()))
+        .then(|| parameters.to_vec())
+    }
+
     /// Whether the scope supplies every context argument of a receiver-function value invoked with
     /// its context parameters omitted.
     pub(super) fn receiver_function_context_available(

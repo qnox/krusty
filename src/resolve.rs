@@ -4746,36 +4746,9 @@ impl<'a> Checker<'a> {
                 }
                 return self.record_property_read(scope, mexpr, selection);
             }
-            Err(PropertyReadAmbiguity::MemberExtension) => {
+            Err(ambiguity) => {
                 if report_diagnostics {
-                    self.diags.error(
-                        diagnostic_span,
-                        format!("overload resolution ambiguity for member '{name}'"),
-                    );
-                }
-                return Ty::Error;
-            }
-            Err(PropertyReadAmbiguity::Extension) => {
-                if report_diagnostics {
-                    self.diags.error(
-                        diagnostic_span,
-                        format!("overload resolution ambiguity for extension property '{name}'"),
-                    );
-                }
-                return Ty::Error;
-            }
-            Err(PropertyReadAmbiguity::MissingContext) => {
-                if report_diagnostics {
-                    self.diags.error(
-                        diagnostic_span,
-                        format!("No context argument for '{name}' found."),
-                    );
-                }
-                return Ty::Error;
-            }
-            Err(PropertyReadAmbiguity::Accessors(candidates)) => {
-                if report_diagnostics {
-                    self.report_accessor_ambiguity(diagnostic_span, candidates);
+                    self.report_property_read_ambiguity(diagnostic_span, name, ambiguity);
                 }
                 return Ty::Error;
             }
@@ -10334,50 +10307,6 @@ impl<'a> Checker<'a> {
                     .as_ref()
                     .map(|(signature, _, _)| signature.clone())
                     .or_else(|| self.stable_single_top_level_signature(&fname));
-                // A function-valued property on an implicit receiver is itself a complete call
-                // candidate. Its semantic function shape must reach argument typing before the
-                // general top-level/member probe: `reference(Inner())` can be the only evidence for
-                // `Inner`'s type arguments. The same selected dispatch-property identity is consumed
-                // below by `record_receiver_function_invoke`; this only exposes its already-known
-                // value-parameter expectations and performs no second lookup after selection.
-                let receiver_function_argument_types = self
-                    .local_callable_type(scope, &fname)
-                    .and_then(|(semantic, origin)| {
-                        matches!(origin, ReceiverFnValueOrigin::DispatchProperty { .. })
-                            .then_some(semantic)
-                    })
-                    .and_then(|semantic| {
-                        let TyKind::Fun(signature) = semantic.kind() else {
-                            return None;
-                        };
-                        if arg_names.is_some() {
-                            return None;
-                        }
-                        if signature.has_receiver {
-                            let parts = Self::receiver_function_parts(signature)?;
-                            return (self.receiver_function_context_available(scope, &parts)
-                                && self
-                                    .receiver_function_implicit_receiver(
-                                        scope,
-                                        parts.receiver,
-                                        parts.values.len(),
-                                        args.len(),
-                                    )
-                                    .is_some())
-                            .then(|| parts.values.to_vec());
-                        }
-                        let context_count = signature.context_count.min(signature.params.len());
-                        let parameters = &signature.params[context_count..];
-                        (parameters.len() == args.len()
-                            && (context_count == 0
-                                || self
-                                    .select_context_arguments(
-                                        scope,
-                                        &signature.params[..context_count],
-                                    )
-                                    .is_some()))
-                        .then(|| parameters.to_vec())
-                    });
                 let known_call_shape = known_sig.as_ref().and_then(|signature| {
                     let params = signature
                         .generic_sig
@@ -10723,6 +10652,7 @@ impl<'a> Checker<'a> {
                 let source_member_depth = ordinary_this_member_lambda_shape
                     .as_ref()
                     .map(|(depth, _)| *depth);
+                let mut implicit_property_function = None;
                 let this_member_shaping = (implicit_member_lambda_enabled
                     && source_member_depth != Some(0))
                 .then(|| {
@@ -10736,43 +10666,80 @@ impl<'a> Checker<'a> {
                         .map(|argument| self.type_ref_ty(scope, argument))
                         .collect::<Vec<_>>();
                     let partial = this_member_partial.clone().unwrap_or_default();
-                    self.implicit_member_receiver_types(scope)
+                    for receiver in self
+                        .implicit_member_receiver_types(scope)
                         .into_iter()
                         .take(source_member_depth.unwrap_or(usize::MAX))
-                        .find_map(|receiver| {
-                            let shaping = self.call_lambda_shaping(
-                                scope,
-                                call,
-                                (receiver, &fname),
-                                UntypedLambdaCall {
-                                    args,
-                                    partial: &partial,
-                                    arg_names: arg_names.as_deref(),
-                                    trailing_lambda: self
-                                        .file
-                                        .call_has_trailing_lambda
-                                        .contains(&call.0),
-                                    type_args: &type_args,
-                                    expected,
-                                },
-                                CallResultConstraint::direct(expected),
-                                None,
-                            );
-                            // A receiver ANSWERS only if what it offers can shape a lambda.
-                            // `extension_lambda_shape` returns a shape for a receiver whose lambda
-                            // slot mapped to a non-function parameter — carrying receivers or
-                            // materialization but no parameter types — and taking that as an answer
-                            // would end the sweep on a receiver with nothing to give, where asking
-                            // per source used to fall through to the next receiver.
-                            (shaping
-                                .extension
-                                .as_ref()
-                                .is_some_and(|shape| shape.param_types.is_some())
-                                || shaping.provider.is_some())
-                            .then_some(shaping)
-                        })
+                    {
+                        let shaping = self.call_lambda_shaping(
+                            scope,
+                            call,
+                            (receiver, &fname),
+                            UntypedLambdaCall {
+                                args,
+                                partial: &partial,
+                                arg_names: arg_names.as_deref(),
+                                trailing_lambda: self
+                                    .file
+                                    .call_has_trailing_lambda
+                                    .contains(&call.0),
+                                type_args: &type_args,
+                                expected,
+                            },
+                            CallResultConstraint::direct(expected),
+                            None,
+                        );
+                        // A receiver ANSWERS only if what it offers can shape a lambda.
+                        // `extension_lambda_shape` returns a shape for a receiver whose lambda
+                        // slot mapped to a non-function parameter — carrying receivers or
+                        // materialization but no parameter types — and taking that as an answer
+                        // would end the sweep on a receiver with nothing to give, where asking
+                        // per source used to fall through to the next receiver.
+                        if shaping
+                            .extension
+                            .as_ref()
+                            .is_some_and(|shape| shape.param_types.is_some())
+                            || shaping.provider.is_some()
+                        {
+                            return Some(shaping);
+                        }
+                        // A property of this receiver whose value claims the call is a candidate
+                        // at the same tower level, behind the receiver's own applicable functions.
+                        // It answers for the level; an ambiguous read ends the sweep with no
+                        // expectation, and the final call path reports it.
+                        match self.implicit_callable_property(scope, receiver, &fname) {
+                            Ok(Some(property)) => {
+                                let value = property.ty().non_null();
+                                implicit_property_function = value.is_fun().then_some(value);
+                                return None;
+                            }
+                            Ok(None) => {}
+                            Err(_) => return None,
+                        }
+                    }
+                    None
                 })
                 .flatten();
+                // A function-valued property on an implicit receiver is itself a complete call
+                // candidate. Its semantic function shape must reach argument typing before the
+                // general top-level/member probe: `reference(Inner())` can be the only evidence for
+                // `Inner`'s type arguments. The receiver sweep above selected it at its own level; a
+                // dispatch property no nearer receiver's property outranks claims the call lexically.
+                let receiver_function_argument_types = implicit_property_function
+                    .or_else(|| {
+                        let (semantic, origin) = self.local_callable_type(scope, &fname)?;
+                        (lexical_value_claims_call
+                            && matches!(origin, ReceiverFnValueOrigin::DispatchProperty { .. }))
+                        .then_some(semantic)
+                    })
+                    .and_then(|semantic| {
+                        self.function_value_argument_expectations(
+                            scope,
+                            semantic,
+                            args.len(),
+                            arg_names.is_some(),
+                        )
+                    });
                 let ordinary_this_member_lambda_shape = ordinary_this_member_lambda_shape
                     .filter(|_| this_member_shaping.is_none())
                     .map(|(_, shape)| shape);
@@ -30731,11 +30698,13 @@ impl<'a> Checker<'a> {
     /// Whether the selected lexical VALUE contributes an invoke candidate. Callable references
     /// retain their exact function shape beside their nominal `KProperty`/`KFunction` type, so the
     /// binding record is authoritative; ordinary callable objects still derive capability from
-    /// their semantic type and declared `operator fun invoke`.
+    /// their semantic type and `operator fun invoke`. A dispatch property yields to a nearer one.
     fn local_value_claims_call(&self, scope: &CheckerScope<'_>, name: &str) -> bool {
         self.lookup(scope, name).is_some_and(|local| {
-            self.local_callable_type(scope, name).is_some()
-                || self.value_type_claims_call(scope, local.ty)
+            !matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { receiver_identity, .. }
+                if self.nearer_receiver_property_claims_call(scope, name, receiver_identity))
+                && (self.local_callable_type(scope, name).is_some()
+                    || self.value_type_claims_call(scope, local.ty))
         })
     }
 

@@ -469,6 +469,31 @@ impl Checker<'_> {
         )
     }
 
+    /// Report the reason a property read selected no single declaration.
+    pub(super) fn report_property_read_ambiguity(
+        &mut self,
+        span: super::Span,
+        name: &str,
+        ambiguity: PropertyReadAmbiguity,
+    ) {
+        match ambiguity {
+            PropertyReadAmbiguity::MemberExtension => self.diags.error(
+                span,
+                format!("overload resolution ambiguity for member '{name}'"),
+            ),
+            PropertyReadAmbiguity::Extension => self.diags.error(
+                span,
+                format!("overload resolution ambiguity for extension property '{name}'"),
+            ),
+            PropertyReadAmbiguity::MissingContext => self
+                .diags
+                .error(span, format!("No context argument for '{name}' found.")),
+            PropertyReadAmbiguity::Accessors(candidates) => {
+                self.report_accessor_ambiguity(span, candidates)
+            }
+        }
+    }
+
     pub(super) fn report_accessor_ambiguity(&mut self, span: super::Span, candidates: Vec<String>) {
         let mut message = "overload resolution ambiguity between candidates:".to_string();
         for candidate in candidates {
