@@ -47,7 +47,17 @@ pub(crate) fn arg_fits(parameter: &Ty, argument: &Ty) -> bool {
                 || crate::types::same(name, crate::types::wk::java_object()))
                 && !matches!(argument.kind(), TyKind::Null | TyKind::Nullable(_)))
         || matches!((parameter.fun_arity(), argument.fun_arity()), (Some(expected), Some(actual)) if expected == actual)
-        || matches!((parameter.kind(), argument.kind()), (TyKind::Obj(expected, _), TyKind::Obj(actual, _)) if expected == actual)
+        || same_classifier_fits(parameter, argument)
+}
+
+/// The erased classifier fit: an argument fits a parameter naming the same classifier, seen
+/// through nullability and a Java platform type `C<…>!`. A nullable argument fits only a parameter
+/// that admits `null` (`C<…>?` or `C<…>!`).
+fn same_classifier_fits(parameter: &Ty, argument: &Ty) -> bool {
+    matches!(
+        (parameter.non_null().kind(), argument.non_null().kind()),
+        (TyKind::Obj(expected, _), TyKind::Obj(actual, _)) if expected == actual
+    ) && (parameter.admits_null() || !argument.is_nullable())
 }
 
 /// Whether a function-shaped argument can adapt to a functional-interface parameter.
