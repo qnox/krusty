@@ -383,3 +383,94 @@ fn a_builder_call_in_an_if_without_else_infers_the_builder_variable() {
         "BuilderIfWithoutElse",
     );
 }
+
+/// A builder variable that no statement of the receiver lambda constrains is uninferred, exactly
+/// as one nothing constrains in a lambda with a value parameter.
+#[test]
+fn an_unconstrained_builder_variable_cannot_be_inferred() {
+    let result = common::compiler_diagnostics(
+        &[(
+            "Use.kt",
+            "interface Base<K>\n\
+             interface Controller<T> : Base<T>\n\
+             fun <S> generate(g: Controller<S>.() -> Unit): S = TODO()\n\
+             fun Base<*>.starBase() {}\n\
+             val untouched = generate { }\n\
+             val star = generate { starBase() }\n",
+        )],
+        &[common::stdlib_jar()],
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr).len(), 2);
+    common::expect_identical_rejection(&result, "unconstrained builder variable");
+}
+
+const BUILDEE_DECLARATIONS: &str = "open class Buildee<TV> {\n\
+    fun get(): TV = TODO()\n\
+}\n\
+class Derived<TA> : Buildee<TA>()\n\
+class Target\n\
+fun <PTV> build(instructions: Buildee<PTV>.() -> Unit): Buildee<PTV> =\n\
+    Buildee<PTV>().apply(instructions)\n";
+
+/// A builder lambda whose discarded tail is typed by the builder variable still constrains it, a
+/// cast of `this` keeps the declared receiver for a bare member call, and an anonymous function's
+/// declared return type constrains it through its expression body.
+#[test]
+fn a_builder_variable_used_by_the_tail_a_cast_or_an_anonymous_function_is_inferred() {
+    common::assert_accepted_like_kotlinc(&format!(
+        "{BUILDEE_DECLARATIONS}\
+         fun tail() = build {{ get() }}\n\
+         fun cast() = build {{ this as Derived<*>; get() }}\n\
+         fun anonymous() {{ build {{ fun(): Buildee<Target> = this }} }}\n\
+         fun consume(value: Any?) {{}}\n\
+         fun used() {{ build {{ this as Derived<*>; val value = get(); consume(value) }} }}\n\
+         fun <T> Buildee<T>.declared(): T {{ this as Derived<*>; return get() }}\n"
+    ));
+}
+
+/// A builder variable only a cast, a declaration or a discarded statement mentions stays open, and
+/// an anonymous function's expression body must conform to its declared return type.
+#[test]
+fn builder_variables_without_evidence_and_a_mismatched_anonymous_body_are_rejected() {
+    let result = common::compiler_diagnostics(
+        &[(
+            "Use.kt",
+            &format!(
+                "{BUILDEE_DECLARATIONS}\
+                 fun cast() {{ build {{ this as Derived<*> }} }}\n\
+                 fun declaration() {{ build {{ val derived = this as Derived<*> }} }}\n\
+                 fun consume(value: Any?) {{}}\n\
+                 fun argument() {{ build {{ this as Derived<*>; consume(get()) }} }}\n\
+                 fun typed() {{ build {{ this as Derived<*>; val value: Any? = get() }} }}\n\
+                 fun mismatch() {{ val f = fun(): Int = \"s\" }}\n"
+            ),
+        )],
+        &[common::stdlib_jar()],
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr).len(), 5);
+    common::expect_identical_rejection(&result, "builder variables without evidence");
+}
+
+/// A lambda coerced to `Unit` checks its last expression against `Unit`, so a call whose result is
+/// its own open formal infers it, and a context argument supplied by a builder lambda's receiver
+/// constrains the builder variable as an extension receiver does.
+#[test]
+fn a_unit_coerced_tail_and_a_context_argument_constrain_open_variables() {
+    common::assert_accepted_like_kotlinc(
+        "fun coerceToUnit(f: () -> Unit) {}\n\
+         class Inv<T>\n\
+         fun <K> builder(block: Inv<K>.() -> Unit): K = TODO()\n\
+         fun <K> make(): K = TODO()\n\
+         fun tail() { coerceToUnit { builder {} } }\n\
+         fun block() { coerceToUnit { val x = 1; make() } }\n\
+         interface Either<out A, out B>\n\
+         interface Raise<in E>\n\
+         fun <E, A> either(block: Raise<E>.() -> A): Either<E, A> = TODO()\n\
+         context(_: Raise<String>)\n\
+         fun findUser(): String = TODO()\n\
+         context(_: Raise<String>)\n\
+         val prop: String get() = TODO()\n\
+         fun function() { either { findUser() } }\n\
+         fun property() { either { prop } }\n",
+    );
+}

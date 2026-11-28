@@ -3349,7 +3349,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .ok()
                 .flatten()
         }) {
-            self.commit_postponed_property_receiver(scope, &property, receiver.get());
+            self.commit_postponed_assignability(scope, property.receiver, receiver.get());
             if let Some(signature) =
                 self.demanded_source_signature(None, property.stable_declaration, demand)?
             {

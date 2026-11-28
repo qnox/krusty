@@ -119,3 +119,20 @@ fn anon_fun_in_a_property_initializer_returns_locally() {
         fun box(): String = if (a(\"OK\") == \"OK\") \"OK\" else \"Fail\"\n";
     assert_eq!(run(SRC).expect("anon fun local return"), "OK");
 }
+
+/// `return` as the whole expression body of an anonymous function without a declared return type
+/// is an error, however the function is used.
+#[test]
+fn a_return_as_an_implicit_expression_body_is_rejected() {
+    let result = common::compiler_diagnostics(
+        &[(
+            "Use.kt",
+            "fun inferred() = fun() = return 1\n\
+             fun expected(): () -> Int = fun() = return 1\n\
+             fun receiver() = fun Int.() = return this\n",
+        )],
+        &[common::stdlib_jar()],
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr).len(), 3);
+    common::expect_identical_rejection(&result, "return in an implicit expression body");
+}

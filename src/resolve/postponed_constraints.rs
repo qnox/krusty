@@ -523,8 +523,7 @@ impl Checker<'_> {
                     && (depends_on_open_result
                         || generic.params.iter().any(|parameter| {
                             matches!(parameter.non_null().kind(), TyKind::Fun(function)
-                                if !function.has_receiver
-                                    && function.params.iter().any(|input| {
+                                if function.params.iter().any(|input| {
                                         ty_mentions_param(
                                             *input,
                                             std::slice::from_ref(formal),

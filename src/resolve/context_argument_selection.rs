@@ -249,6 +249,40 @@ impl super::Checker<'_> {
         Ok(out)
     }
 
+    /// A context argument over a postponed call's type variables adds its constraint against the
+    /// context parameter it fills to that call, as an implicit extension receiver does.
+    pub(super) fn constrain_postponed_context_arguments(
+        &mut self,
+        span: crate::diag::Span,
+        parameters: &[Ty],
+        actuals: &[Option<Ty>],
+    ) {
+        for (&parameter, actual) in parameters.iter().zip(actuals) {
+            if let Some(actual) = actual.filter(|actual| self.postponed_call_mentions(*actual)) {
+                self.expect_assignable(parameter, actual, span, "context argument");
+            }
+        }
+    }
+
+    /// [`Self::constrain_postponed_context_arguments`] for a selected top-level property read.
+    pub(super) fn constrain_postponed_property_context(
+        &mut self,
+        span: crate::diag::Span,
+        access: &super::ResolvedPropertyAccess,
+    ) {
+        let property = &access.property;
+        let parameters = &property.getter.params[..property.context_count];
+        let actuals = access
+            .context_args
+            .iter()
+            .map(|argument| match argument {
+                ResolvedContextArgument::ImplicitReceiver(selected) => Some(selected.ty),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        self.constrain_postponed_context_arguments(span, parameters, &actuals);
+    }
+
     /// Each binding a local function's `body` passes as an implicit context argument or receiver,
     /// with its name: the exact binding the checker selected, found by its recorded flow identity.
     pub(super) fn selected_context_bindings(
