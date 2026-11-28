@@ -2335,12 +2335,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     receiver: Some(receiver),
                     ..
                 } = &**checked_op
-                    && (self.lazy_getter(*target, *receiver).is_some()
-                        || self.pair_getter(*target, *receiver).is_some()) =>
+                    && self.pair_getter(*target, *receiver).is_some() =>
             {
                 let name = self
-                    .lazy_getter(*target, *receiver)
-                    .or_else(|| self.pair_getter(*target, *receiver))
+                    .pair_getter(*target, *receiver)
                     .expect("checked by the guard");
                 match self.list_property_member(&name, *receiver, any()) {
                     Some(realized) => realized,

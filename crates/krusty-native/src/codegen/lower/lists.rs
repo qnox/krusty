@@ -74,41 +74,6 @@ fn has_standard_identity(ty: Ty, predicate: fn(krusty::types::TypeName) -> bool)
     ty.non_null().obj_internal().is_some_and(predicate)
 }
 
-/// The runtime function answering one member of a `Lazy`.
-///
-/// `getValue` is the delegate convention's own name for the same question, and it is an EXTENSION
-/// of the lazy facade rather than a member — so it arrives with the lazy as its receiver and the
-/// delegation's two operands as arguments, neither of which a lazy reads.
-fn lazy_symbol(
-    signature: super::super::super::intrinsics::FunctionSignature<'_>,
-) -> Option<(&'static str, Vec<Ty>, Ty)> {
-    Some(match (signature.name, signature.params, signature.ret) {
-        ("value", [], ret)
-            if super::super::super::intrinsics::classifier_matches(
-                signature.owner.physical(),
-                "kotlin/Lazy",
-            ) && ret.is_reference() =>
-        {
-            ("kt_lazy_value", vec![any()], any())
-        }
-        ("getValue", [_, _], ret)
-            if super::super::super::intrinsics::is_lazy_facade(signature.owner)
-                && ret.is_reference() =>
-        {
-            ("kt_lazy_value", vec![any()], any())
-        }
-        ("isInitialized", [], Ty::Boolean)
-            if super::super::super::intrinsics::classifier_matches(
-                signature.owner.physical(),
-                "kotlin/Lazy",
-            ) =>
-        {
-            ("kt_lazy_is_initialized", vec![any()], Ty::Boolean)
-        }
-        _ => return None,
-    })
-}
-
 /// The runtime function answering one member of a `Pair`.
 ///
 /// `component1`/`component2` are what a destructuring reads, and are the same two questions under
@@ -451,35 +416,6 @@ impl BodyLowering<'_, '_, '_> {
         self.runtime_call("kt_mutable_list_of", &[any()], any(), &[elements])
     }
 
-    /// `lazy { … }`, or `None` when the declaration is something else.
-    ///
-    /// Only the one-argument form is realized. The overloads taking a thread-safety mode or a lock
-    /// decline by arity: this target has no threads, and answering one of those as if it were the
-    /// plain form would silently drop what the program asked for.
-    pub(super) fn lazy_construction(
-        &mut self,
-        signature: super::super::super::intrinsics::FunctionSignature<'_>,
-        args: &[u32],
-    ) -> Option<Result<Option<Value>, Unsupported>> {
-        if !super::super::super::intrinsics::is_lazy_facade(signature.owner)
-            || signature.name != "lazy"
-            || !matches!(signature.params, [parameter] if parameter.is_fun())
-            || !signature.ret.is_reference()
-        {
-            return None;
-        }
-        let [initializer] = args else { return None };
-        Some(self.lazy_of(*initializer))
-    }
-
-    fn lazy_of(&mut self, initializer: u32) -> Result<Option<Value>, Unsupported> {
-        let function = self.reference(initializer)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        self.runtime_call("kt_lazy_of", &[any()], any(), &[function])
-    }
-
     /// `ReadOnlyProperty.getValue` on a delegate this FILE declares.
     ///
     /// Unlike `ReadWriteProperty`, whose `notNull()` and `observable(…)` the runtime builds itself,
@@ -559,25 +495,6 @@ impl BodyLowering<'_, '_, '_> {
             },
         )?;
         Ok(produced)
-    }
-
-    /// `l.value` — a checked read of a dependency property the runtime answers.
-    pub(super) fn lazy_getter(
-        &self,
-        target: krusty::fir::ExternalPropertyId,
-        receiver: u32,
-    ) -> Option<String> {
-        if !self
-            .checked_type(receiver)
-            .is_some_and(|ty| has_standard_identity(ty, super::classifier_shapes::is_lazy))
-        {
-            return None;
-        }
-        let property = self.file.callables.property(target)?;
-        if property.name.as_ref() != "value" || !property.result.is_reference() {
-            return None;
-        }
-        Some(property.name.to_string())
     }
 
     /// `a to b`, or `None` when the declaration is something else.
@@ -738,9 +655,7 @@ impl BodyLowering<'_, '_, '_> {
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let ty = self.checked_type(receiver)?;
-        let (symbol, answer) = if has_standard_identity(ty, super::classifier_shapes::is_lazy) {
-            ("kt_lazy_value", any())
-        } else if has_standard_identity(ty, super::classifier_shapes::is_pair) {
+        let (symbol, answer) = if has_standard_identity(ty, super::classifier_shapes::is_pair) {
             match name {
                 "first" => ("kt_pair_first", any()),
                 "second" => ("kt_pair_second", any()),
@@ -791,13 +706,6 @@ impl BodyLowering<'_, '_, '_> {
         let ty = self.checked_type(receiver)?;
         // Iteration first: a `List` is iterated through the same dispatch an `Iterable` is, so the
         // one member both spellings share is answered in one place.
-        if has_standard_identity(ty, super::classifier_shapes::is_lazy) {
-            let (symbol, carried, answer) = lazy_symbol(signature)?;
-            // `getValue(thisRef, property)` hands over two operands a lazy has no use for; the
-            // runtime takes the receiver alone, so they are not evaluated here either — the
-            // delegation already evaluated whatever they name.
-            return Some(self.list_call(symbol, &carried, answer, receiver, &[], ret));
-        }
         // `comparator.compare(a, b)`. A `Comparator` this runtime makes is a function value of two
         // arguments, so its one member is the invoke every function value answers; the runtime
         // entry point is that invoke with the boxed answer unwrapped, which keeps the `Int` the

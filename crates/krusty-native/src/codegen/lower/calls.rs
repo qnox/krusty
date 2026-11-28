@@ -493,13 +493,6 @@ impl BodyLowering<'_, '_, '_> {
                 .with_receiver(declared_receiver)
                 .with_context_count(realization.context_count)
                 .with_overridden(&realization.overridden_declarations);
-                // The runtime owns `lazy { … }`: the exported body of the library's own `lazy` is
-                // an intrinsic stub that throws, so the export must not win over the construction.
-                if dispatch_receiver.is_none() {
-                    if let Some(realized) = self.lazy_construction(signature, args) {
-                        return realized;
-                    }
-                }
                 if let Some(realized) =
                     self.floating_range_construction(signature, dispatch_receiver, args, *ret)
                 {
@@ -973,9 +966,6 @@ impl BodyLowering<'_, '_, '_> {
                         if let Some(realized) =
                             self.map_construction(signature, packs_a_vararg, args)
                         {
-                            return realized;
-                        }
-                        if let Some(realized) = self.lazy_construction(signature, args) {
                             return realized;
                         }
                         if let Some(operation) =

@@ -260,9 +260,7 @@ impl BodyLowering<'_, '_, '_> {
         {
             return None;
         }
-        if self.lazy_getter(target, receiver).is_some()
-            || self.pair_getter(target, receiver).is_some()
-        {
+        if self.pair_getter(target, receiver).is_some() {
             return Some(any());
         }
         if let Some(name) = self.indexed_value_getter(target, receiver) {
