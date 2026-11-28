@@ -1,0 +1,5 @@
+# Kotlin 2.4.21 parcelize box cases that pass with classes that are not byte-identical to the reference compiler's on jvm, relative to
+# the upstream corpus directory. Later releases with no file of their own read this one.
+# Regenerate with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local run.
+kt20021.kt
+kt20717.kt
