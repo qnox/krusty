@@ -1314,12 +1314,60 @@ impl Body<'_> {
         if declaration.owner != Some(entry.owner)
             || declaration.ty != entry.ty
             || declaration.mutable != entry.setter.is_some()
-            || declaration.extension_receiver.is_some()
-            || !declaration.context_parameters.is_empty()
+            || *entry.parameters
+                != *krusty::backend::receiver_property_accessors::record_parameters(declaration)
         {
             return Err("a cross-file member property disagrees with its module record".into());
         }
         Ok(Some(entry))
+    }
+
+    /// An access to an extension or context property another file of the module declares: a call
+    /// of its getter or setter entry with the dispatch receiver of a member, then `declared` (its
+    /// context arguments, then its extension receiver), then a written value, in that order.
+    pub(super) fn module_receiver_property(
+        &mut self,
+        target: PropertyId,
+        dispatch_receiver: Option<u32>,
+        declared: &[u32],
+        value: Option<u32>,
+    ) -> Result<(), Unsupported> {
+        if self.ir.local_property_layouts.contains_key(&target) {
+            return Err("an extension or context property access left unrealized".to_string());
+        }
+        let (getter, setter, ty, parameters) = match dispatch_receiver {
+            Some(receiver) => {
+                let entry = self.module_member_property(target)?.ok_or_else(|| {
+                    "a cross-file member extension or context property with no module entry"
+                        .to_string()
+                })?;
+                self.value(receiver, Ty::obj_name(entry.owner))?;
+                (entry.getter, entry.setter, entry.ty, entry.parameters)
+            }
+            None => {
+                let entry = self.properties.accessor(target).ok_or_else(|| {
+                    "a cross-file extension or context property with no module entry".to_string()
+                })?;
+                (entry.getter, entry.setter, entry.ty, entry.parameters)
+            }
+        };
+        if parameters.len() != declared.len() {
+            return Err("a cross-file accessor call whose operands do not match its entry".into());
+        }
+        for (&operand, &parameter) in declared.iter().zip(parameters.iter()) {
+            self.argument(operand, parameter)?;
+        }
+        let entry = match value {
+            None => getter,
+            Some(value) => {
+                let setter = setter
+                    .ok_or_else(|| "a read-only cross-file property was written".to_string())?;
+                self.value(value, ty)?;
+                setter
+            }
+        };
+        self.code.call(entry);
+        Ok(())
     }
 
     /// The entries of a receiver-less property another file realizes through its accessors.
@@ -1871,6 +1919,12 @@ pub(super) fn define_module_property_functions(
             .local_property_layouts
             .get(&definition.property)
             .ok_or_else(|| "a module member property with no local layout".to_string())?;
+        if !definition.entry.parameters.is_empty() {
+            super::accessor_property_entries::define_receiver_member(
+                context, classes, definition, layout, module, runtime,
+            )?;
+            continue;
+        }
         let IrLocalPropertyLayout::Member {
             class,
             owner,
@@ -2084,7 +2138,7 @@ fn coerce_property_entry(
 }
 
 /// Append the table reference and indirect call after the wrapper's receiver and value operands.
-fn emit_module_property_dispatch(
+pub(super) fn emit_module_property_dispatch(
     classes: &FileClasses,
     runtime: &Runtime,
     class: ClassId,

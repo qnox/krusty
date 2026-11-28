@@ -426,7 +426,6 @@ innerNested/passingOuterRef.kt
 intrinsics/trimMarginWithBlankString.kt
 ir/serializationRegressions/anonFakeOverride.kt
 ir/serializationRegressions/innerClassInEnumEntryClass.kt
-ir/serializationRegressions/varAsFunctionCall.kt
 jdk/iteratingOverHashMap.kt
 jdk/noStringToCharArray.kt
 ktype/ktype1_basics1.kt
@@ -439,15 +438,11 @@ ktype/nonReified_reifiedUpperBound.kt
 lambda/lambda_kt49360_withFlow.kt
 lower/forLoopsLowering/progressions.kt
 multiplatform/k2/anonymousObjectAndSpecificImplementationInDeserializedIr.kt
-multiplatform/k2/basic/contextInFakeOverride.kt
 multiplatform/k2/basic/delegatedByExpectExtensionProperty.kt
 multiplatform/k2/basic/expectActualFakeOverrides2.kt
 multiplatform/k2/basic/expectActualFakeOverridesWithTypeParameters.kt
 multiplatform/k2/basic/expectActualIntersectionOverride2.kt
-multiplatform/k2/basic/expectActualOverloads.kt
-multiplatform/k2/basic/expectActualTypeParameters.kt
 multiplatform/k2/basic/expectInterfaceInSupertypes.kt
-multiplatform/k2/basic/extensionAndFakeOverride.kt
 multiplatform/k2/basic/interfaceMethodFromSuperTypeIsImplementedInOtherExpectSuperClass.kt
 multiplatform/k2/basic/localSubstitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/nameBasedDestructuringFullForm.kt
@@ -459,7 +454,6 @@ multiplatform/k2/defaultArguments/kt67488.kt
 multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/delegation/delegationToExpectInterface_noNewMembers.kt
 multiplatform/k2/expectStatic.kt
-multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritance.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflictDefaults.kt

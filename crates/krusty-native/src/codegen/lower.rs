@@ -1616,7 +1616,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if self.file.is_imported_property(target)
                     && !self.has_property_layout_at(id, target)
                 {
-                    return self.module_property_write(target, *dispatch_receiver, *value);
+                    return self.module_property_write(target, *dispatch_receiver, &[], *value);
                 }
                 match self.checked_property_at(id, target) {
                     Ok(objects::CheckedProperty::Member(class, index)) => {
@@ -2366,7 +2366,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if self.file.is_imported_property(target)
                     && !self.has_property_layout_at(id, target)
                 {
-                    return self.module_property_read(target, *dispatch_receiver);
+                    return self.module_property_read(target, *dispatch_receiver, &[]);
                 }
                 match self.checked_property_at(id, target) {
                     Ok(objects::CheckedProperty::Member(class, index)) => {
