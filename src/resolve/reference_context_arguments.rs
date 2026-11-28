@@ -37,7 +37,10 @@ impl Checker<'_> {
                 params: expected_params,
                 ret: expected_ret,
                 bound_contexts,
-                type_variable_inputs: self.active_reference_type_variable_inputs(),
+                type_variable_inputs: expected_params.map_or_else(
+                    || self.active_reference_type_variable_inputs(),
+                    |expected| self.reference_type_variable_inputs_resolving(expected),
+                ),
                 quirks: self.file.reference.quirks(),
             },
             |actual, bound| self.generic_bound_admits(actual, bound),
