@@ -750,6 +750,7 @@ impl Code {
 
 /// The numeric opcodes this file and the code generator use, named as the text format names them.
 pub(super) const EQZ32: u8 = 0x45;
+pub(super) const EQZ64: u8 = 0x50;
 pub(super) const EQ32: u8 = 0x46;
 pub(super) const NE32: u8 = 0x47;
 pub(super) const LT_S32: u8 = 0x48;
