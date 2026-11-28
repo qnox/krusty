@@ -8,6 +8,8 @@ use krusty::backend::{BackendCompilerIntrinsic, DependencyGetterSignature};
 use krusty::types::{type_name, Ty, TypeName};
 
 use super::super::super::encode::HeapType;
+use crate::array_objects::{ArrayForm, ElementRead};
+
 use super::*;
 
 /// Each array classifier, the storage classifier its `storage` property has, and the element
@@ -118,6 +120,109 @@ impl Body<'_> {
         self.callables.callable(target).is_some_and(|fact| {
             fact.compiler_operation() == Some(BackendCompilerIntrinsic::ArrayStorageCopy)
         })
+    }
+
+    /// Whether `target` is an authenticated `@WasmOp` operation on a GC array class's own value.
+    pub(super) fn is_array_storage_operation(
+        &self,
+        target: krusty::fir::ExternalCallableId,
+        operation: BackendCompilerIntrinsic,
+    ) -> bool {
+        self.callables
+            .callable(target)
+            .is_some_and(|fact| fact.compiler_operation() == Some(operation))
+    }
+
+    /// The form of the array whose storage class is the checked type of `receiver`, and that type
+    /// and the element it stores.
+    fn array_storage_operand(&mut self, receiver: u32) -> Result<(Ty, ArrayForm, Ty), Unsupported> {
+        let storage = self
+            .type_of(receiver)?
+            .ok_or("an array storage operation without a checked receiver type")?;
+        let element = storage_element(storage)
+            .ok_or_else(|| format!("an array storage operation on `{}`", describe(storage)))?;
+        let (form, stored) = self.array_form(Ty::array(element))?;
+        self.value(receiver, storage)?;
+        self.code.ref_cast(false, HeapType::Concrete(form.storage));
+        Ok((element, form, stored))
+    }
+
+    /// `storage.len()`: one `array.len`, which traps on null as kotlinc's instruction does.
+    pub(super) fn array_storage_length(&mut self, receiver: u32) -> Result<(), Unsupported> {
+        self.array_storage_operand(receiver)?;
+        self.code.array_len();
+        Ok(())
+    }
+
+    /// `storage.get(index)`: one `array.get` of the form's element read, which traps outside the
+    /// array.
+    pub(super) fn array_storage_get(
+        &mut self,
+        receiver: u32,
+        index: u32,
+    ) -> Result<(), Unsupported> {
+        let (element, form, stored) = self.array_storage_operand(receiver)?;
+        self.value(index, Ty::Int)?;
+        match form.read {
+            ElementRead::Plain => self.code.array_get(form.storage),
+            ElementRead::Signed => self.code.array_get_s(form.storage),
+            ElementRead::Unsigned => self.code.array_get_u(form.storage),
+        };
+        self.coerce_emitted_value(stored, element)
+    }
+
+    /// `storage.set(index, value)`: one `array.set`.
+    pub(super) fn array_storage_set(
+        &mut self,
+        receiver: u32,
+        index: u32,
+        value: u32,
+    ) -> Result<(), Unsupported> {
+        let (_, form, stored) = self.array_storage_operand(receiver)?;
+        self.value(index, Ty::Int)?;
+        self.value(value, stored)?;
+        self.code.array_set(form.storage);
+        Ok(())
+    }
+
+    /// `WasmCharArray(size)` and its siblings: a GC array class's own constructor, one
+    /// `array.new_default` of the storage the class names. `None` when `internal` is no array
+    /// storage class.
+    pub(super) fn array_storage_construction(
+        &mut self,
+        internal: TypeName,
+        args: &[u32],
+    ) -> Option<Result<(), Unsupported>> {
+        let (_, _, element) = storage_classifiers()
+            .into_iter()
+            .find(|(_, storage, _)| *storage == internal)?;
+        let [size] = args else {
+            return Some(Err("an array storage construction without its size".into()));
+        };
+        Some((|| {
+            let (form, _) = self.array_form(Ty::array(element))?;
+            self.value(*size, Ty::Int)?;
+            self.code.array_new_default(form.storage);
+            Ok(())
+        })())
+    }
+
+    /// `chars.createString()`: the string over the array's code units. This target's string is
+    /// the struct over its `$chars` array, so the units are wrapped, not copied; the stdlib copies
+    /// before it asks.
+    pub(super) fn string_from_char_storage(&mut self, chars: u32) -> Result<(), Unsupported> {
+        self.value(chars, Ty::obj("kotlin/wasm/internal/WasmCharArray"))?;
+        self.code
+            .ref_cast(false, HeapType::Concrete(self.runtime.chars))
+            .struct_new(self.runtime.string);
+        Ok(())
+    }
+
+    /// `string.getChars()`: the string's own code units, as the stdlib's `String` answers them.
+    pub(super) fn string_char_storage(&mut self, string: u32) -> Result<(), Unsupported> {
+        self.value(string, Ty::String)?;
+        self.code.struct_get(self.runtime.string, 0);
+        Ok(())
     }
 
     /// `wasm_array_copy<T>(destination, destinationIndex, source, sourceIndex, length)`: one

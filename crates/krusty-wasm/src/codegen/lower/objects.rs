@@ -162,6 +162,9 @@ impl Body<'_> {
         if let Some(constructed) = self.scalar_value_construction(internal, args, selected) {
             return constructed;
         }
+        if let Some(constructed) = self.array_storage_construction(internal, args) {
+            return constructed;
+        }
         let Some(class) = self.classes.and(self.ir.class_id_by_name(internal)) else {
             if let Some(constructed) = self.cross_file_construction(site, internal, args) {
                 return constructed;

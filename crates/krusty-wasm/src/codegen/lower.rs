@@ -66,6 +66,11 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySize
         || operation == krusty::backend::BackendCompilerIntrinsic::ArrayStorageCopy
+        || operation == krusty::backend::BackendCompilerIntrinsic::ArrayStorageLength
+        || operation == krusty::backend::BackendCompilerIntrinsic::ArrayStorageGet
+        || operation == krusty::backend::BackendCompilerIntrinsic::ArrayStorageSet
+        || operation == krusty::backend::BackendCompilerIntrinsic::StringFromCharArrayStorage
+        || operation == krusty::backend::BackendCompilerIntrinsic::StringCharArrayStorage
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
         || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
         || operation == krusty::backend::BackendCompilerIntrinsic::StringPlus
@@ -1464,6 +1469,100 @@ impl<'a> Body<'a> {
                 && self.is_array_storage_copy(*target) =>
             {
                 self.array_storage_copy(*target, substitutions, &args)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver: None,
+                args,
+            } if let Callee::External {
+                target,
+                defaults,
+                extension_receiver_parameter: Some(0),
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && (self.is_array_storage_operation(
+                    *target,
+                    krusty::backend::BackendCompilerIntrinsic::StringFromCharArrayStorage,
+                ) || self.is_array_storage_operation(
+                    *target,
+                    krusty::backend::BackendCompilerIntrinsic::StringCharArrayStorage,
+                )) =>
+            {
+                let [receiver] = args.as_slice() else {
+                    return Err("an authenticated string storage move with malformed operands".into());
+                };
+                if self.is_array_storage_operation(
+                    *target,
+                    krusty::backend::BackendCompilerIntrinsic::StringFromCharArrayStorage,
+                ) {
+                    self.string_from_char_storage(*receiver)?;
+                } else {
+                    self.string_char_storage(*receiver)?;
+                }
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver: Some(receiver),
+                args,
+            } if let Callee::External {
+                target,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.is_array_storage_operation(
+                    *target,
+                    krusty::backend::BackendCompilerIntrinsic::ArrayStorageLength,
+                ) =>
+            {
+                if !args.is_empty() {
+                    return Err("an authenticated array length with operands".into());
+                }
+                self.array_storage_length(receiver)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver: Some(receiver),
+                args,
+            } if let Callee::External {
+                target,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.is_array_storage_operation(
+                    *target,
+                    krusty::backend::BackendCompilerIntrinsic::ArrayStorageGet,
+                ) =>
+            {
+                let [index] = args.as_slice() else {
+                    return Err("an authenticated array storage read with malformed operands".into());
+                };
+                self.array_storage_get(receiver, *index)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver: Some(receiver),
+                args,
+            } if let Callee::External {
+                target,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.is_array_storage_operation(
+                    *target,
+                    krusty::backend::BackendCompilerIntrinsic::ArrayStorageSet,
+                ) =>
+            {
+                let [index, value] = args.as_slice() else {
+                    return Err("an authenticated array storage write with malformed operands".into());
+                };
+                self.array_storage_set(receiver, *index, *value)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,

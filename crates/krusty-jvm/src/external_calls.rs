@@ -1128,6 +1128,11 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::CharIsSurrogate(_)
                 | krusty::libraries::CompilerIntrinsic::RadixToString { .. }
                 | krusty::libraries::CompilerIntrinsic::ArrayStorageCopy
+                | krusty::libraries::CompilerIntrinsic::ArrayStorageLength
+                | krusty::libraries::CompilerIntrinsic::ArrayStorageGet
+                | krusty::libraries::CompilerIntrinsic::ArrayStorageSet
+                | krusty::libraries::CompilerIntrinsic::StringFromCharArrayStorage
+                | krusty::libraries::CompilerIntrinsic::StringCharArrayStorage
                 | krusty::libraries::CompilerIntrinsic::StringRangeEquals
                 | krusty::libraries::CompilerIntrinsic::StringIndexOf { .. }
                 | krusty::libraries::CompilerIntrinsic::ArrayCopy { .. }
